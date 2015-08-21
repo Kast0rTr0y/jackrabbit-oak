@@ -24,6 +24,7 @@ import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.MODIFIED_I
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.MODIFIED_IN_SECS_RESOLUTION;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.NUM_REVS_THRESHOLD;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.PREV_SPLIT_FACTOR;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.getModifiedInSecs;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -49,6 +50,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -57,12 +60,15 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.commit.AnnotatingConflictHandler;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictHook;
 import org.apache.jackrabbit.oak.plugins.commit.ConflictValidatorProvider;
+import org.apache.jackrabbit.oak.plugins.document.UpdateOp.Key;
+import org.apache.jackrabbit.oak.plugins.document.UpdateOp.Operation;
 import org.apache.jackrabbit.oak.plugins.document.cache.CacheInvalidationStats;
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.util.TimingDocumentStoreWrapper;
@@ -98,8 +104,8 @@ public class DocumentNodeStoreTest {
         DocumentStore docStore = new MemoryDocumentStore();
         DocumentStore testStore = new TimingDocumentStoreWrapper(docStore) {
             @Override
-            public CacheInvalidationStats invalidateCache() {
-                super.invalidateCache();
+            public CacheInvalidationStats invalidateCache(Iterable<String> keys) {
+                super.invalidateCache(keys);
                 semaphore.acquireUninterruptibly();
                 semaphore.release();
                 return null;
@@ -236,15 +242,27 @@ public class DocumentNodeStoreTest {
         final DocumentMK mk = new DocumentMK.Builder()
                 .setDocumentStore(docStore).setAsyncDelay(0).open();
         final DocumentNodeStore store = mk.getNodeStore();
-        final String head = mk.commit("/", "+\"foo\":{}+\"bar\":{}", null, null);
+
+        NodeBuilder builder = store.getRoot().builder();
+        builder.child("deletedNode");
+        builder.child("updateNode").setProperty("foo", "bar");
+        merge(store, builder);
+
+        builder = store.getRoot().builder();
+        builder.child("deletedNode").remove();
+        merge(store, builder);
+
+        final Revision head = store.getHeadRevision();
+
         Thread writer = new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
                     Revision r = store.newRevision();
-                    Commit c = new Commit(store, r, Revision.fromString(head), null);
-                    c.addNode(new DocumentNodeState(store, "/foo/node", r));
-                    c.addNode(new DocumentNodeState(store, "/bar/node", r));
+                    Commit c = new Commit(store, r, head, null);
+                    c.addNode(new DocumentNodeState(store, "/newConflictingNode", r));
+                    c.addNode(new DocumentNodeState(store, "/deletedNode", r));
+                    c.updateProperty("/updateNode", "foo", "baz");
                     c.apply();
                 } catch (DocumentStoreException e) {
                     exceptions.add(e);
@@ -259,21 +277,35 @@ public class DocumentNodeStoreTest {
         created.acquireUninterruptibly();
         // commit will succeed and add collision marker to writer commit
         Revision r = store.newRevision();
-        Commit c = new Commit(store, r, Revision.fromString(head), null);
-        c.addNode(new DocumentNodeState(store, "/foo/node", r));
-        c.addNode(new DocumentNodeState(store, "/bar/node", r));
+        Commit c = new Commit(store, r, head, null);
+        c.addNode(new DocumentNodeState(store, "/newConflictingNode", r));
+        c.addNode(new DocumentNodeState(store, "/newNonConflictingNode", r));
         c.apply();
         // allow writer to continue
         s.release();
         writer.join();
         assertEquals("expected exception", 1, exceptions.size());
 
-        String id = Utils.getIdFromPath("/foo/node");
+        String id = Utils.getIdFromPath("/newConflictingNode");
         NodeDocument doc = docStore.find(NODES, id);
         assertNotNull("document with id " + id + " does not exist", doc);
-        id = Utils.getIdFromPath("/bar/node");
+        assertTrue("document with id " + id + " should get _deletedOnce marked due to rollback",
+                doc.wasDeletedOnce());
+
+        id = Utils.getIdFromPath("/newNonConflictingNode");
         doc = docStore.find(NODES, id);
-        assertNotNull("document with id " + id + " does not exist", doc);
+        assertNull("document with id " + id + " must not have _deletedOnce",
+                doc.get(NodeDocument.DELETED_ONCE));
+
+        id = Utils.getIdFromPath("/deletedNode");
+        doc = docStore.find(NODES, id);
+        assertTrue("document with id " + id + " should get _deletedOnce marked due to rollback",
+                doc.wasDeletedOnce());
+
+        id = Utils.getIdFromPath("/updateNode");
+        doc = docStore.find(NODES, id);
+        assertNull("document with id " + id + " must not have _deletedOnce despite rollback",
+                doc.get(NodeDocument.DELETED_ONCE));
 
         mk.dispose();
     }
@@ -1657,7 +1689,7 @@ public class DocumentNodeStoreTest {
         merge(ns, builder);
         Revision to = ns.getHeadRevision();
 
-        DiffCache.Entry entry = ns.getDiffCache().newEntry(from, to);
+        DiffCache.Entry entry = ns.getDiffCache().newEntry(from, to, true);
         entry.append("/", "-\"foo\"");
         entry.done();
 
@@ -1749,6 +1781,188 @@ public class DocumentNodeStoreTest {
 
     }
 
+    // OAK-1970
+    @Test
+    public void diffMany() throws Exception {
+        Clock clock = new Clock.Virtual();
+        clock.waitUntil(System.currentTimeMillis());
+        Revision.setClock(clock);
+        final List<Long> startValues = Lists.newArrayList();
+        MemoryDocumentStore ds = new MemoryDocumentStore() {
+            @Nonnull
+            @Override
+            public <T extends Document> List<T> query(Collection<T> collection,
+                                                      String fromKey,
+                                                      String toKey,
+                                                      String indexedProperty,
+                                                      long startValue,
+                                                      int limit) {
+                if (indexedProperty != null) {
+                    startValues.add(startValue);
+                }
+                return super.query(collection, fromKey, toKey, indexedProperty, startValue, limit);
+            }
+        };
+        DocumentNodeStore ns = new DocumentMK.Builder().clock(clock)
+                .setDocumentStore(ds).setAsyncDelay(0).getNodeStore();
+
+        NodeBuilder builder = ns.getRoot().builder();
+        NodeBuilder test = builder.child("test");
+        for (int i = 0; i < DocumentMK.MANY_CHILDREN_THRESHOLD * 2; i++) {
+            test.child("node-" + i);
+        }
+        merge(ns, builder);
+
+        // 'wait one hour'
+        clock.waitUntil(clock.getTime() + TimeUnit.HOURS.toMillis(1));
+
+        // perform a change and use the resulting root as before state
+        builder = ns.getRoot().builder();
+        builder.child("foo");
+        DocumentNodeState before = asDocumentNodeState(merge(ns, builder));
+        NodeState beforeTest = before.getChildNode("test");
+
+        // perform another change to span the diff across multiple revisions
+        // this will prevent diff calls served from the local cache
+        builder = ns.getRoot().builder();
+        builder.child("bar");
+        merge(ns, builder);
+
+        // add a child node
+        builder = ns.getRoot().builder();
+        builder.child("test").child("bar");
+        NodeState after = merge(ns, builder);
+        NodeState afterTest = after.getChildNode("test");
+
+        startValues.clear();
+        afterTest.compareAgainstBaseState(beforeTest, new DefaultNodeStateDiff());
+
+        assertEquals(1, startValues.size());
+        long beforeModified = getModifiedInSecs(before.getRevision().getTimestamp());
+        // startValue must be based on the revision of the before state
+        // and not when '/test' was last modified
+        assertEquals(beforeModified, (long) startValues.get(0));
+
+        ns.dispose();
+    }
+
+    // OAK-2620
+    @Test
+    public void nonBlockingReset() throws Exception {
+        final List<String> failure = Lists.newArrayList();
+        final AtomicReference<ReentrantReadWriteLock> mergeLock
+                = new AtomicReference<ReentrantReadWriteLock>();
+        MemoryDocumentStore store = new MemoryDocumentStore() {
+            @Override
+            public <T extends Document> T findAndUpdate(Collection<T> collection,
+                                                        UpdateOp update) {
+                for (Map.Entry<Key, Operation> entry : update.getChanges().entrySet()) {
+                    if (entry.getKey().getName().equals(NodeDocument.COLLISIONS)) {
+                        ReentrantReadWriteLock rwLock = mergeLock.get();
+                        if (rwLock.getReadHoldCount() > 0
+                                || rwLock.getWriteHoldCount() > 0) {
+                            failure.add("Branch reset still holds merge lock");
+                            break;
+                        }
+                    }
+                }
+                return super.findAndUpdate(collection, update);
+            }
+        };
+        DocumentNodeStore ds = new DocumentMK.Builder()
+                .setDocumentStore(store)
+                .setAsyncDelay(0).getNodeStore();
+        ds.setMaxBackOffMillis(0); // do not retry merges
+
+        DocumentNodeState root = ds.getRoot();
+        final DocumentNodeStoreBranch b = ds.createBranch(root);
+        // branch state is now Unmodified
+
+        assertTrue(b.getMergeLock() instanceof ReentrantReadWriteLock);
+        mergeLock.set((ReentrantReadWriteLock) b.getMergeLock());
+
+        NodeBuilder builder = root.builder();
+        builder.child("foo");
+        b.setRoot(builder.getNodeState());
+        // branch state is now InMemory
+        builder.child("bar");
+        b.setRoot(builder.getNodeState());
+        // branch state is now Persisted
+
+        try {
+            b.merge(new CommitHook() {
+                @Nonnull
+                @Override
+                public NodeState processCommit(NodeState before,
+                                               NodeState after,
+                                               CommitInfo info)
+                        throws CommitFailedException {
+                    NodeBuilder foo = after.builder().child("foo");
+                    for (int i = 0; i <= DocumentRootBuilder.UPDATE_LIMIT; i++) {
+                        foo.setProperty("prop", i);
+                    }
+                    throw new CommitFailedException("Fail", 0, "");
+                }
+            }, CommitInfo.EMPTY);
+        } catch (CommitFailedException e) {
+            // expected
+        }
+
+        ds.dispose();
+
+        for (String s : failure) {
+            fail(s);
+        }
+    }
+
+    @Test
+    public void failFastOnBranchConflict() throws Exception {
+        final AtomicInteger mergeAttempts = new AtomicInteger();
+        MemoryDocumentStore store = new MemoryDocumentStore() {
+            @Override
+            public <T extends Document> T findAndUpdate(Collection<T> collection,
+                                                        UpdateOp update) {
+                for (Key k : update.getConditions().keySet()) {
+                    if (k.getName().equals(NodeDocument.COLLISIONS)) {
+                        mergeAttempts.incrementAndGet();
+                        break;
+                    }
+                }
+                return super.findAndUpdate(collection, update);
+            }
+        };
+        DocumentNodeStore ds = new DocumentMK.Builder()
+                .setDocumentStore(store)
+                .setAsyncDelay(0).getNodeStore();
+
+        DocumentNodeState root = ds.getRoot();
+        DocumentNodeStoreBranch b = ds.createBranch(root);
+        // branch state is now Unmodified
+        NodeBuilder builder = root.builder();
+        builder.child("foo");
+        b.setRoot(builder.getNodeState());
+        // branch state is now InMemory
+        builder.child("bar").setProperty("p", "foo");
+        b.setRoot(builder.getNodeState());
+        // branch state is now Persisted
+
+        // create conflict with persisted branch
+        NodeBuilder nb = ds.getRoot().builder();
+        nb.child("bar").setProperty("p", "bar");
+        merge(ds, nb);
+
+        mergeAttempts.set(0);
+        try {
+            b.merge(EmptyHook.INSTANCE, CommitInfo.EMPTY);
+            fail("must fail with CommitFailedException");
+        } catch (CommitFailedException e) {
+            // expected
+        }
+
+        assertTrue("too many merge attempts: " + mergeAttempts.get(),
+                mergeAttempts.get() <= 1);
+    }
+
     private static DocumentNodeState asDocumentNodeState(NodeState state) {
         if (!(state instanceof DocumentNodeState)) {
             throw new IllegalArgumentException("Not a DocumentNodeState");
@@ -1778,9 +1992,9 @@ public class DocumentNodeStoreTest {
         }
     }
 
-    private static void merge(NodeStore store, NodeBuilder root)
+    private static NodeState merge(NodeStore store, NodeBuilder root)
             throws CommitFailedException {
-        store.merge(root, EmptyHook.INSTANCE, CommitInfo.EMPTY);
+        return store.merge(root, EmptyHook.INSTANCE, CommitInfo.EMPTY);
     }
 
     private static class TestHook extends EditorHook {

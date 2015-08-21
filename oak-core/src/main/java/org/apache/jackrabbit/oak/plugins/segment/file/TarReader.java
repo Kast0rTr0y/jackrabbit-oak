@@ -182,8 +182,7 @@ class TarReader {
         }
     }
 
-    private static TarReader openFirstFileWithValidIndex(
-            List<File> files, boolean memoryMapping) throws IOException {
+    private static TarReader openFirstFileWithValidIndex(List<File> files, boolean memoryMapping) {
         for (File file : files) {
             String name = file.getName();
             try {
@@ -369,7 +368,6 @@ class TarReader {
                 if (checkbytes[i] != header[148 + i]) {
                     log.warn("Invalid entry checksum at offset {} in tar file {}, skipping...",
                              access.getFilePointer() - BLOCK_SIZE, file);
-                    continue;
                 }
             }
 
@@ -430,6 +428,8 @@ class TarReader {
     private final FileAccess access;
 
     private final ByteBuffer index;
+
+    private volatile boolean closed;
 
     private TarReader(File file, FileAccess access, ByteBuffer index) {
         this.file = file;
@@ -697,7 +697,16 @@ class TarReader {
         GC_LOG.info("Cleaned segments from {}: {}", file.getName(), uuids);
     }
 
+    /**
+     * @return  {@code true} iff this reader has been closed
+     * @see #close()
+     */
+    boolean isClosed() {
+        return closed;
+    }
+
     File close() throws IOException {
+        closed = true;
         access.close();
         return file;
     }

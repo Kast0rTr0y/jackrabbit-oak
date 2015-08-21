@@ -20,6 +20,7 @@ import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Maps.newHashMap;
 import static org.apache.jackrabbit.oak.api.Type.BINARIES;
 import static org.apache.jackrabbit.oak.api.Type.BINARY;
+import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -27,6 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import com.google.common.hash.Hashing;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
@@ -35,13 +37,13 @@ import org.apache.jackrabbit.oak.plugins.memory.BinaryPropertyState;
 import org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState;
 import org.apache.jackrabbit.oak.plugins.memory.MultiBinaryPropertyState;
 import org.apache.jackrabbit.oak.plugins.memory.PropertyStates;
+import org.apache.jackrabbit.oak.plugins.segment.compaction.CompactionStrategy;
+import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
 import org.apache.jackrabbit.oak.spi.state.ApplyDiff;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.google.common.hash.Hashing;
 
 /**
  * Tool for compacting segments.
@@ -61,7 +63,7 @@ public class Compactor {
 
     private final SegmentWriter writer;
 
-    private final CompactionMap map;
+    private final PartialCompactionMap map;
 
     /**
      * Map from {@link #getBlobKey(Blob) blob keys} to matching compacted
@@ -77,52 +79,110 @@ public class Compactor {
     private final boolean cloneBinaries;
 
     public Compactor(SegmentWriter writer) {
-        this(writer, false);
-    }
-
-    public Compactor(SegmentWriter writer, boolean cloneBinaries) {
         this.writer = writer;
-        this.map = new CompactionMap(100000, writer.getTracker());
-        this.cloneBinaries = cloneBinaries;
+        this.map = new InMemoryCompactionMap(writer.getTracker());
+        this.cloneBinaries = false;
     }
 
-    protected SegmentNodeBuilder process(NodeState before, NodeState after) {
-        SegmentNodeBuilder builder = new SegmentNodeBuilder(
-                writer.writeNode(before), writer);
+    public Compactor(FileStore store, CompactionStrategy compactionStrategy) {
+        this.writer = store.createSegmentWriter();
+        if (compactionStrategy.getPersistCompactionMap()) {
+            this.map = new PersistedCompactionMap(store);
+        } else {
+            this.map = new InMemoryCompactionMap(writer.getTracker());
+        }
+        this.cloneBinaries = compactionStrategy.cloneBinaries();
+    }
+
+    protected SegmentNodeBuilder process(NodeState before, NodeState after, NodeState onto) {
+        SegmentNodeBuilder builder = new SegmentNodeBuilder(writer.writeNode(onto), writer);
         after.compareAgainstBaseState(before, new CompactDiff(builder));
         return builder;
     }
 
+    /**
+     * Compact the differences between a {@code before} and a {@code after}
+     * on top of the {@code before} state.
+     * <p>
+     * Equivalent to {@code compact(before, after, before)}
+     *
+     * @param before  the before state
+     * @param after   the after state
+     * @return  the compacted state
+     */
     public SegmentNodeState compact(NodeState before, NodeState after) {
-        SegmentNodeState compacted = process(before, after).getNodeState();
+        SegmentNodeState compacted = process(before, after, before).getNodeState();
         writer.flush();
         return compacted;
     }
 
-    public CompactionMap getCompactionMap() {
+    /**
+     * Compact the differences between a {@code before} and a {@code after}
+     * on top of an {@code onto} state.
+     * @param before  the before state
+     * @param after   the after state
+     * @param onto    the onto state
+     * @return  the compacted state
+     */
+    public SegmentNodeState compact(NodeState before, NodeState after, NodeState onto) {
+        SegmentNodeState compacted = process(before, after, onto).getNodeState();
+        writer.flush();
+        return compacted;
+    }
+
+    public PartialCompactionMap getCompactionMap() {
         map.compress();
         return map;
     }
 
     private class CompactDiff extends ApplyDiff {
 
+        /**
+         * Current processed path, or null if the trace log is not enabled at
+         * the beginning of the compaction call. The null check will also be
+         * used to verify if a trace log will be needed or not
+         */
+        private final String path;
+
         CompactDiff(NodeBuilder builder) {
             super(builder);
+            if (log.isTraceEnabled()) {
+                this.path = "/";
+            } else {
+                this.path = null;
+            }
+        }
+
+        private CompactDiff(NodeBuilder builder, String path, String childName) {
+            super(builder);
+            if (path != null) {
+                this.path = concat(path, childName);
+            } else {
+                this.path = null;
+            }
         }
 
         @Override
         public boolean propertyAdded(PropertyState after) {
+            if (path != null) {
+                log.trace("propertyAdded {}/{}", path, after.getName());
+            }
             return super.propertyAdded(compact(after));
         }
 
         @Override
-        public boolean propertyChanged(
-                PropertyState before, PropertyState after) {
+        public boolean propertyChanged(PropertyState before, PropertyState after) {
+            if (path != null) {
+                log.trace("propertyChanged {}/{}", path, after.getName());
+            }
             return super.propertyChanged(before, compact(after));
         }
 
         @Override
         public boolean childNodeAdded(String name, NodeState after) {
+            if (path != null) {
+                log.trace("childNodeAdded {}/{}", path, name);
+            }
             RecordId id = null;
             if (after instanceof SegmentNodeState) {
                 id = ((SegmentNodeState) after).getRecordId();
@@ -135,7 +195,7 @@ public class Compactor {
 
             NodeBuilder child = EmptyNodeState.EMPTY_NODE.builder();
             boolean success = EmptyNodeState.compareAgainstEmptyState(after,
-                    new CompactDiff(child));
+                    new CompactDiff(child, path, name));
 
             if (success) {
                 SegmentNodeState state = writer.writeNode(child.getNodeState());
@@ -151,6 +211,10 @@ public class Compactor {
         @Override
         public boolean childNodeChanged(
                 String name, NodeState before, NodeState after) {
+            if (path != null) {
+                log.trace("childNodeChanged {}/{}", path, name);
+            }
+
             RecordId id = null;
             if (after instanceof SegmentNodeState) {
                 id = ((SegmentNodeState) after).getRecordId();
@@ -163,7 +227,7 @@ public class Compactor {
 
             NodeBuilder child = builder.getChildNode(name);
             boolean success = after.compareAgainstBaseState(before,
-                    new CompactDiff(child));
+                    new CompactDiff(child, path, name));
 
             if (success) {
                 RecordId compactedId = writer.writeNode(child.getNodeState())

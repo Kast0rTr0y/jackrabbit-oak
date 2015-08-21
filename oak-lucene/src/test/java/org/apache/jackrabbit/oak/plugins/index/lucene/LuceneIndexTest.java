@@ -38,6 +38,7 @@ import static javax.jcr.PropertyType.TYPENAME_STRING;
 import static junit.framework.Assert.assertEquals;
 import static junit.framework.Assert.assertFalse;
 import static junit.framework.Assert.assertTrue;
+import static junit.framework.Assert.fail;
 import static org.apache.jackrabbit.JcrConstants.JCR_SYSTEM;
 import static org.apache.jackrabbit.JcrConstants.NT_BASE;
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NAME;
@@ -66,6 +67,7 @@ import com.google.common.base.Function;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Maps;
 import org.apache.commons.io.FileUtils;
+import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateProvider;
@@ -124,7 +126,8 @@ public class LuceneIndexTest {
     @Test
     public void testLuceneV1NonExistentProperty() throws Exception {
         NodeBuilder index = builder.child(INDEX_DEFINITIONS_NAME);
-        newLuceneIndexDefinition(index, "lucene", ImmutableSet.of("String"));
+        NodeBuilder defn = newLuceneIndexDefinition(index, "lucene", ImmutableSet.of("String"));
+        defn.setProperty(LuceneIndexConstants.COMPAT_MODE, IndexFormatVersion.V1.getVersion());
 
         NodeState before = builder.getNodeState();
         builder.setProperty("foo", "value-with-dash");
@@ -751,6 +754,25 @@ public class LuceneIndexTest {
         assertQuery(tracker, indexed, "foo3", "bar3");
         assertEquals(0, copier.getInvalidFileCount());
         assertEquals(1, copier.getIndexDir("/oak:index/lucene").listFiles().length);
+    }
+
+    @Test
+    public void multiValuesForOrderedIndexShouldNotThrow() {
+        NodeBuilder index = newLuceneIndexDefinition(builder.child(INDEX_DEFINITIONS_NAME), "lucene", null);
+        NodeBuilder singleProp = TestUtil.child(index, "indexRules/nt:base/properties/single");
+        singleProp.setProperty(LuceneIndexConstants.PROP_PROPERTY_INDEX, true);
+        singleProp.setProperty(LuceneIndexConstants.PROP_ORDERED, true);
+        singleProp.setProperty(LuceneIndexConstants.PROP_INCLUDED_TYPE, PropertyType.TYPENAME_STRING);
+
+        NodeState before = builder.getNodeState();
+        builder.setProperty("single", asList("baz", "bar"), Type.STRINGS);
+        NodeState after = builder.getNodeState();
+
+        try {
+            HOOK.processCommit(before, after, CommitInfo.EMPTY);
+        } catch (CommitFailedException e) {
+            fail("Exception thrown when indexing invalid content");
+        }
     }
 
     @After

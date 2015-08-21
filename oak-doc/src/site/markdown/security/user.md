@@ -241,6 +241,17 @@ are
 See section [Password Expiry and Force Initial Password Change](user/expiry.html)
 for details.
 
+#### Password History
+
+Since Oak 1.3.3 the default user management implementation provides password
+history support.
+
+By default this feature is disabled. The corresponding configuration option is
+
+- `PARAM_PASSWORD_HISTORY_SIZE`: number of changed passwords to remember.
+
+See section [Password History](user/history.html) for details.
+
 #### Utilities
 
 `org.apache.jackrabbit.oak.spi.security.user.*`
@@ -283,14 +294,21 @@ as of OAK 1.0:
 | `PARAM_IMPORT_BEHAVIOR`             | String ("abort", "ignore", "besteffort") | "ignore"    |
 | `PARAM_PASSWORD_MAX_AGE`            | int     | 0                                            |
 | `PARAM_PASSWORD_INITIAL_CHANGE`     | boolean | false                                        |
+| `PARAM_PASSWORD_HISTORY_SIZE`       | int (upper limit: 1000) | 0                            |
+| `PARAM_CACHE_EXPIRATION`            | long    | 0                                            |
 | | | |
 
 The following configuration parameters present with the default implementation in Jackrabbit 2.x are no longer supported and will be ignored:
 
-* 'compatibleJR16'
-* 'autoExpandTree'
-* 'autoExpandSize'
-* 'groupMembershipSplitSize'
+* `compatibleJR16`
+* `autoExpandTree`
+* `autoExpandSize`
+* `groupMembershipSplitSize`
+
+The optional `cacheExpiration` configuration option listed above is discussed in
+detail in section [Caching Results of Principal Resolution](principal/cache.html).
+It is not related to user management s.str. but affects the implementation
+specific `PrincipalProvider` implementation exposed by `UserConfiguration.getUserPrincipalProvider`.
 
 ### Pluggability
 
@@ -317,6 +335,7 @@ implementation on various levels:
 - [Authorizable Node Name](user/authorizablenodename.html)
 - [Searching Users and Groups](user/query.html)
 - [Password Expiry and Force Initial Password Change](user/expiry.html)
+- [Password History](user/history.html)
 
 <!-- hidden references -->
 [everyone]: /oak/docs/apidocs/org/apache/jackrabbit/oak/spi/security/principal/EveryonePrincipal.html#NAME

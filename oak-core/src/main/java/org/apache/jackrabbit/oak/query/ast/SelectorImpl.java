@@ -41,6 +41,7 @@ import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.PropertyValue;
+import org.apache.jackrabbit.oak.api.Result.SizePrecision;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
@@ -721,7 +722,7 @@ public class SelectorImpl extends SourceImpl {
     public boolean equals(Object other) {
         if (this == other) {
             return true;
-        } else if (!(this instanceof SelectorImpl)) {
+        } else if (!(other instanceof SelectorImpl)) {
             return false;
         }
         return selectorName.equals(((SelectorImpl) other).selectorName);
@@ -752,4 +753,12 @@ public class SelectorImpl extends SourceImpl {
         return query;
     }
 
+    @Override
+    public long getSize(SizePrecision precision, long max) {
+        if (cursor == null) {
+            return -1;
+        }
+        return cursor.getSize(precision, max);
+    }
+    
 }

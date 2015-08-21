@@ -59,6 +59,7 @@
               org.apache.jackrabbit.oak.plugins.commit,
               org.apache.jackrabbit.oak.plugins.identifier,
               org.apache.jackrabbit.oak.plugins.index,
+              org.apache.jackrabbit.oak.plugins.index.fulltext,
               org.apache.jackrabbit.oak.plugins.index.aggregate,
               org.apache.jackrabbit.oak.plugins.index.counter,
               org.apache.jackrabbit.oak.plugins.index.nodetype,
@@ -294,6 +295,7 @@
       <groupId>commons-dbcp</groupId>
       <artifactId>commons-dbcp</artifactId>
       <version>1.4</version>
+      <optional>true</optional>
     </dependency>
 
     <!-- Logging -->
@@ -345,6 +347,16 @@
     <dependency>
       <groupId>commons-lang</groupId>
       <artifactId>commons-lang</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.sling</groupId>
+      <artifactId>org.apache.sling.testing.osgi-mock</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-math3</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>

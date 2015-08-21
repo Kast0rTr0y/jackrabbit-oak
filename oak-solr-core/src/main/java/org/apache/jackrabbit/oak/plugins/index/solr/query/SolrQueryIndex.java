@@ -32,6 +32,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
 import org.apache.jackrabbit.oak.api.PropertyValue;
+import org.apache.jackrabbit.oak.api.Result.SizePrecision;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.plugins.index.solr.configuration.OakSolrConfiguration;
 import org.apache.jackrabbit.oak.query.QueryEngineSettings;
@@ -125,24 +126,30 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
             match++; // full text queries have usually a significant recall
         }
 
-        // path restriction defined AND path restrictions handled
-        if (filter.getPathRestriction() != null &&
-                !Filter.PathRestriction.NO_RESTRICTION.equals(filter.getPathRestriction())
-                && configuration.useForPathRestrictions()) {
-            match++;
-        }
-
-        // primary type restriction defined AND primary type restriction handled
-        if (filter.getPrimaryTypes().size() > 0 && configuration.useForPrimaryTypes()) {
-            match++;
-        }
-
         // property restriction OR native language property restriction defined AND property restriction handled
         if (filter.getPropertyRestrictions() != null && filter.getPropertyRestrictions().size() > 0
                 && (filter.getPropertyRestriction(NATIVE_SOLR_QUERY) != null || filter.getPropertyRestriction(NATIVE_LUCENE_QUERY) != null
                 || configuration.useForPropertyRestrictions()) && !hasIgnoredProperties(filter.getPropertyRestrictions(), configuration)) {
             match++;
         }
+
+        // path restriction defined AND path restrictions handled
+        if (filter.getPathRestriction() != null &&
+                !Filter.PathRestriction.NO_RESTRICTION.equals(filter.getPathRestriction())
+                && configuration.useForPathRestrictions()) {
+            if (match > 0) {
+                match++;
+            }
+        }
+
+        // primary type restriction defined AND primary type restriction handled
+        if (filter.getPrimaryTypes().size() > 0 && configuration.useForPrimaryTypes()) {
+            if (match > 0) {
+                match++;
+            }
+        }
+
+
 
         return match;
     }
@@ -196,12 +203,13 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
 
     @Override
     public Cursor query(final IndexPlan plan, final NodeState root) {
-        return query(plan.getFilter(), plan.getSortOrder(), root);
+        return query(plan, plan.getSortOrder(), root);
     }
 
-    private Cursor query(Filter filter, List<OrderEntry> sortOrder, NodeState root) {
+    private Cursor query(IndexPlan plan, List<OrderEntry> sortOrder, NodeState root) {
         Cursor cursor;
         try {
+            Filter filter = plan.getFilter();
             final Set<String> relPaths = filter.getFullTextConstraint() != null ? getRelativePaths(filter.getFullTextConstraint())
                     : Collections.<String>emptySet();
             final String parent = relPaths.size() == 0 ? "" : relPaths.iterator().next();
@@ -210,7 +218,7 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
 
             AbstractIterator<SolrResultRow> iterator = getIterator(filter, sortOrder, parent, parentDepth);
 
-            cursor = new SolrRowCursor(iterator, filter.getQueryEngineSettings());
+            cursor = new SolrRowCursor(iterator, plan, filter.getQueryEngineSettings());
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -272,12 +280,19 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
                     }
                     SolrQuery query = FilterQueryParser.getQuery(filter, sortOrder, configuration);
                     if (numFound > 0) {
-                        offset++;
-                        int newOffset = offset * configuration.getRows();
+                        long rows = configuration.getRows();
+                        long maxQueries = numFound / 2;
+                        if (maxQueries > configuration.getRows()) {
+                            // adjust the rows to avoid making more than 3 Solr requests for this particular query
+                            rows = maxQueries;
+                            query.setParam("rows", String.valueOf(rows));
+                        }
+                        long newOffset = configuration.getRows() + offset * rows;
                         if (newOffset >= numFound) {
                             return false;
                         }
                         query.setParam("start", String.valueOf(newOffset));
+                        offset++;
                     }
                     if (log.isDebugEnabled()) {
                         log.debug("sending query {}", query);
@@ -446,8 +461,6 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
         estimator.update(filter, docs);
     }
 
-
-
     @Override
     public String getPlanDescription(IndexPlan plan, NodeState root) {
         return plan.toString();
@@ -455,7 +468,7 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
 
     @Override
     public Cursor query(Filter filter, NodeState rootState) {
-        return query(filter, null, rootState);
+        return query(planBuilder(filter).build(), null, rootState);
     }
 
     static class SolrResultRow {
@@ -480,12 +493,14 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
      * plus, eventually, the returned stored values if {@link org.apache.solr.common.SolrDocument} is included in the
      * {@link org.apache.jackrabbit.oak.plugins.index.solr.query.SolrQueryIndex.SolrResultRow}.
      */
-    static class SolrRowCursor implements Cursor {
+    private class SolrRowCursor implements Cursor {
 
         private final Cursor pathCursor;
+        private final IndexPlan plan;
+
         SolrResultRow currentRow;
 
-        SolrRowCursor(final Iterator<SolrResultRow> it, QueryEngineSettings settings) {
+        SolrRowCursor(final Iterator<SolrResultRow> it, IndexPlan plan, QueryEngineSettings settings) {
             Iterator<String> pathIterator = new Iterator<String>() {
 
                 @Override
@@ -505,7 +520,8 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
                 }
 
             };
-            pathCursor = new Cursors.PathCursor(pathIterator, true, settings);
+            this.plan = plan;
+            this.pathCursor = new Cursors.PathCursor(pathIterator, true, settings);
         }
 
 
@@ -540,6 +556,33 @@ public class SolrQueryIndex implements FulltextQueryIndex, QueryIndex.AdvanceFul
                 }
 
             };
+        }
+
+
+        @Override
+        public long getSize(SizePrecision precision, long max) {
+            long estimate = -1;
+            switch (precision) {
+                case EXACT:
+                    // query solr
+                    SolrQuery countQuery = FilterQueryParser.getQuery(plan.getFilter(), null, SolrQueryIndex.this.configuration);
+                    countQuery.setRows(0);
+                    try {
+                        estimate = SolrQueryIndex.this.solrServer.query(countQuery).getResults().getNumFound();
+                    } catch (SolrServerException e) {
+                        log.warn("could not perform count query {}", countQuery);
+                    }
+                    break;
+                case APPROXIMATION:
+                    // estimate result size
+                    estimate = SolrQueryIndex.this.estimator.estimate(plan.getFilter());
+                    break;
+                case FAST_APPROXIMATION:
+                    // use already computed index plan's estimate
+                    estimate = plan.getEstimatedEntryCount();
+                    break;
+            }
+            return Math.min(estimate, max);
         }
     }
 

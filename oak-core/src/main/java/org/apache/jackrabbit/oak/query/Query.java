@@ -16,6 +16,7 @@ package org.apache.jackrabbit.oak.query;
 import java.util.Iterator;
 import java.util.List;
 
+import aQute.bnd.annotation.ProviderType;
 import org.apache.jackrabbit.oak.api.PropertyValue;
 import org.apache.jackrabbit.oak.api.Result;
 import org.apache.jackrabbit.oak.api.Tree;
@@ -29,6 +30,7 @@ import org.apache.jackrabbit.oak.query.ast.OrderingImpl;
  * initialize the bind variable map. If the query is re-executed, a new instance
  * is created.
  */
+@ProviderType
 public interface Query {
 
     void setExecutionContext(ExecutionContext context);
@@ -55,7 +57,21 @@ public interface Query {
 
     Iterator<ResultRowImpl> getRows();
 
+    /**
+     * Get the size if known.
+     * 
+     * @return the size, or -1 if unknown
+     */
     long getSize();
+    
+    /**
+     * Get the size if known.
+     * 
+     * @param precision the required precision
+     * @param max the maximum nodes read (for an exact size)
+     * @return the size, or -1 if unknown
+     */
+    long getSize(Result.SizePrecision precision, long max);
 
     void setExplain(boolean explain);
 
@@ -64,8 +80,8 @@ public interface Query {
     void setOrderings(OrderingImpl[] orderings);
     
     /**
-     * Initialize the query. This will 'wire' selectors into constraints bind
-     * variables into expressions. It will also simplify expressions if
+     * Initialize the query. This will 'wire' selectors into constraints, and
+     * collect bind variable names. It will also simplify expressions if
      * possible, but will not prepare the query.
      */
     void init();
@@ -95,4 +111,11 @@ public interface Query {
     boolean isMeasureOrExplainEnabled();
 
     void setInternal(boolean internal);
+
+    /**
+     * Returns whether the results will be sorted by index. The query must already be prepared.
+     *
+     * @return if sorted by index
+     */
+    boolean isSortedByIndex();
 }

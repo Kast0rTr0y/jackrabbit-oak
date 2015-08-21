@@ -35,7 +35,6 @@ import javax.jcr.RepositoryException;
 
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.SimpleNodeAggregator;
-import org.apache.jackrabbit.oak.plugins.index.lucene.IndexFormatVersion;
 import org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.lucene.LuceneIndexProvider;
@@ -58,6 +57,7 @@ public class LuceneOakRepositoryStub extends OakTarMKRepositoryStub {
                 new LuceneCompatModeInitializer("luceneGlobal", (Set<String>) null))
                 .with((QueryIndexProvider)provider)
                 .with((Observer) provider)
+                .withFastQueryResultSize(true)
                 .with(new LuceneIndexEditorProvider());
     }
 
@@ -86,8 +86,7 @@ public class LuceneOakRepositoryStub extends OakTarMKRepositoryStub {
                         .setProperty(REINDEX_PROPERTY_NAME, true)
                         .setProperty(LuceneIndexConstants.TEST_MODE, true)
                         .setProperty(LuceneIndexConstants.EVALUATE_PATH_RESTRICTION, true)
-                        .setProperty(LuceneIndexConstants.SUGGEST_UPDATE_FREQUENCY_MINUTES, 10)
-                        .setProperty(LuceneIndexConstants.COMPAT_MODE, IndexFormatVersion.V2.getVersion());
+                        .setProperty(LuceneIndexConstants.SUGGEST_UPDATE_FREQUENCY_MINUTES, 10);
 
                 NodeBuilder props = index.child(LuceneIndexConstants.INDEX_RULES)
                         .child("nt:base")

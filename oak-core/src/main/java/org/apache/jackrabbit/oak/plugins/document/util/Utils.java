@@ -34,6 +34,7 @@ import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.collect.AbstractIterator;
 import com.mongodb.BasicDBObject;
@@ -51,6 +52,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.collect.Iterables.transform;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.isDeletedEntry;
 
 /**
@@ -135,11 +137,11 @@ public class Utils {
             if (e.getKey() instanceof Revision) {
                 size += 32;
             } else {
-                size += 48 + e.getKey().toString().length() * 2;
+                size += estimateMemoryUsage(e.getKey().toString());
             }
             Object o = e.getValue();
             if (o instanceof String) {
-                size += 48 + ((String) o).length() * 2;
+                size += estimateMemoryUsage((String) o);
             } else if (o instanceof Long) {
                 size += 16;
             } else if (o instanceof Boolean) {
@@ -167,6 +169,16 @@ public class Utils {
             size += map.size() * 64;
         }
         return size;
+    }
+
+    /**
+     * Estimates the memory usage of the given string.
+     *
+     * @param s the string to estimate.
+     * @return the estimated memory usage.
+     */
+    public static int estimateMemoryUsage(String s) {
+        return 48 + s.length() * 2;
     }
 
     /**
@@ -521,6 +533,27 @@ public class Utils {
     }
 
     /**
+     * Returns the root node document of the given document store. The returned
+     * document is retrieved from the document store via
+     * {@link DocumentStore#find(Collection, String)}, which means the
+     * implementation is allowed to return a cached version of the document.
+     * The document is therefore not guaranteed to be up-to-date.
+     *
+     * @param store a document store.
+     * @return the root document.
+     * @throws IllegalStateException if there is no root document.
+     */
+    @Nonnull
+    public static NodeDocument getRootDocument(@Nonnull DocumentStore store) {
+        String rootId = Utils.getIdFromPath("/");
+        NodeDocument root = store.find(Collection.NODES, rootId);
+        if (root == null) {
+            throw new IllegalStateException("missing root document");
+        }
+        return root;
+    }
+
+    /**
      * Returns an {@link Iterable} over all {@link NodeDocument}s in the given
      * store matching a condition on an <em>indexed property</em>. The returned
      * {@link Iterable} does not guarantee a consistent view on the store.
@@ -588,5 +621,32 @@ public class Utils {
      */
     public static boolean isHiddenPath(@Nonnull String path) {
         return path.contains("/:");
+    }
+
+    /**
+     * Transforms the given {@link Iterable} from {@link String} to
+     * {@link StringValue} elements. The {@link Iterable} must no have
+     * {@code null} values.
+     */
+    public static Iterable<StringValue> asStringValueIterable(
+            @Nonnull Iterable<String> values) {
+        return transform(values, new Function<String, StringValue>() {
+            @Override
+            public StringValue apply(String input) {
+                return new StringValue(input);
+            }
+        });
+    }
+
+    /**
+     * Transforms the given paths into ids using {@link #getIdFromPath(String)}.
+     */
+    public static Iterable<String> pathToId(@Nonnull Iterable<String> paths) {
+        return transform(paths, new Function<String, String>() {
+            @Override
+            public String apply(String input) {
+                return getIdFromPath(input);
+            }
+        });
     }
 }

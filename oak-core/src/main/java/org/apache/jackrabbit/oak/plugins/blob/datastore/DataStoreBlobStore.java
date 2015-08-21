@@ -19,6 +19,10 @@
 
 package org.apache.jackrabbit.oak.plugins.blob.datastore;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.collect.Iterators.filter;
+import static com.google.common.collect.Iterators.transform;
+
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -56,10 +60,6 @@ import org.apache.jackrabbit.oak.spi.blob.GarbageCollectableBlobStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.collect.Iterators.filter;
-import static com.google.common.collect.Iterators.transform;
-
 /**
  * BlobStore wrapper for DataStore. Wraps Jackrabbit 2 DataStore and expose them as BlobStores
  * It also handles inlining binaries if there size is smaller than
@@ -91,7 +91,7 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
      * Max size of binary whose content would be cached. We keep it greater than
      * Lucene blob size OakDirectory#BLOB_SIZE such that Lucene index blobs are cached
      */
-    private int maxCachedBinarySize = 17 * 1024;
+    private int maxCachedBinarySize = 1024 * 1024;
 
 
     public DataStoreBlobStore(DataStore delegate) {
@@ -106,7 +106,8 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
         this.delegate = delegate;
         this.encodeLengthInId = encodeLengthInId;
 
-        this.cache = CacheLIRS.newBuilder()
+        this.cache = CacheLIRS.<String, byte[]>newBuilder()
+                .module("DataStoreBlobStore")
                 .maximumWeight(cacheSizeInMB * FileUtils.ONE_MB)
                 .weigher(new Weigher<String, byte[]>() {
                     @Override
@@ -378,6 +379,12 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
 
     @Override
     public boolean deleteChunks(List<String> chunkIds, long maxLastModifiedTime) throws Exception {
+        return (chunkIds.size() == countDeleteChunks(chunkIds, maxLastModifiedTime));
+    }    
+    
+    @Override
+    public long countDeleteChunks(List<String> chunkIds, long maxLastModifiedTime) throws Exception {
+        int count = 0;
         if (delegate instanceof MultiDataStoreAware) {
             for (String chunkId : chunkIds) {
                 String blobId = extractBlobId(chunkId);
@@ -385,12 +392,16 @@ public class DataStoreBlobStore implements DataStore, SharedDataStore, BlobStore
                 DataRecord dataRecord = delegate.getRecord(identifier);
                 boolean success = (maxLastModifiedTime <= 0)
                         || dataRecord.getLastModified() <= maxLastModifiedTime;
+                log.trace("Deleting blob [{}] with last modified date [{}] : [{}]", blobId,
+                    dataRecord.getLastModified(), success);
                 if (success) {
                     ((MultiDataStoreAware) delegate).deleteRecord(identifier);
+                    log.trace("Deleted blob [{}]", blobId);
+                    count++;
                 }
             }
         }
-        return true;
+        return count;
     }
 
     @Override

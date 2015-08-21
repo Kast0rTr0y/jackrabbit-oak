@@ -18,9 +18,9 @@ package org.apache.jackrabbit.oak.plugins.segment;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.apache.jackrabbit.oak.plugins.segment.compaction.CompactionStrategy.GAIN_THRESHOLD_DEFAULT;
 import static org.apache.jackrabbit.oak.plugins.segment.compaction.CompactionStrategy.NO_COMPACTION;
 
-import java.io.IOException;
 import java.util.concurrent.Callable;
 
 import javax.annotation.Nonnull;
@@ -43,6 +43,8 @@ public class SegmentNodeStoreBuilder {
     private int lockWaitTime;
     private int retryCount;
     private boolean forceAfterFail;
+    private boolean persistCompactionMap;
+    private byte gainThreshold;
     private CompactionStrategy compactionStrategy;
 
     static SegmentNodeStoreBuilder newSegmentNodeStore(SegmentStore store) {
@@ -53,10 +55,20 @@ public class SegmentNodeStoreBuilder {
         this.store = store;
     }
 
+    @Deprecated
     public SegmentNodeStoreBuilder withCompactionStrategy(
             boolean pauseCompaction, boolean cloneBinaries, String cleanup,
             long cleanupTs, byte memoryThreshold, final int lockWaitTime,
-            int retryCount, boolean forceAfterFail) {
+            int retryCount, boolean forceAfterFail, boolean persistCompactionMap) {
+        return withCompactionStrategy(pauseCompaction, cloneBinaries, cleanup,
+                cleanupTs, memoryThreshold, lockWaitTime, retryCount,
+                forceAfterFail, persistCompactionMap, GAIN_THRESHOLD_DEFAULT);
+    }
+
+    public SegmentNodeStoreBuilder withCompactionStrategy(
+            boolean pauseCompaction, boolean cloneBinaries, String cleanup,
+            long cleanupTs, byte memoryThreshold, final int lockWaitTime,
+            int retryCount, boolean forceAfterFail, boolean persistCompactionMap, byte gainThreshold) {
         this.hasCompactionStrategy = true;
         this.pauseCompaction = pauseCompaction;
         this.cloneBinaries = cloneBinaries;
@@ -66,6 +78,8 @@ public class SegmentNodeStoreBuilder {
         this.lockWaitTime = lockWaitTime;
         this.retryCount = retryCount;
         this.forceAfterFail = forceAfterFail;
+        this.persistCompactionMap = persistCompactionMap;
+        this.gainThreshold = gainThreshold;
         return this;
     }
 
@@ -75,7 +89,7 @@ public class SegmentNodeStoreBuilder {
     }
 
     @Nonnull
-    public SegmentNodeStore create() throws IOException {
+    public SegmentNodeStore create() {
         checkState(!isCreated);
         isCreated = true;
         final SegmentNodeStore segmentStore = new SegmentNodeStore(store, true);
@@ -94,6 +108,8 @@ public class SegmentNodeStoreBuilder {
             };
             compactionStrategy.setRetryCount(retryCount);
             compactionStrategy.setForceAfterFail(forceAfterFail);
+            compactionStrategy.setPersistCompactionMap(persistCompactionMap);
+            compactionStrategy.setGainThreshold(gainThreshold);
         } else {
             compactionStrategy = NO_COMPACTION;
         }

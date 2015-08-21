@@ -69,9 +69,26 @@ import org.slf4j.LoggerFactory;
  * <p>
  * {@link #executeBenchmark(ScalabilityBenchmark, ExecutionContext)} - Actual benchmark/test to be
  * executed. This method will be called in each iteration of the test run.
- * 
+ *
+ * <p>
+ * The following system JVM properties can be defined to configure the suite.
+ * <ul>
+ * <li>
+ *     <code>profile</code> - Controls whether to profile the benchmark or not. Defaults to false.
+ * </li>
+ * <li>
+ *     <code>noWarmup</code> - Controls whether to run warmup or not before each benchmark. Defaults to false.
+ * </li>
+ * <li>
+ *     <code>increments</code> - Comma separated list which controls the incremental load for each iteration.
+ *     Defaults to 1,2,5.
+ * </li>
+ * </ul>
+ * </p>
  */
 public abstract class ScalabilityAbstractSuite implements ScalabilitySuite, CSVResultGenerator {
+    public static final String CTX_SEARCH_PATHS_PROP = "searchPaths";
+
     protected static final Logger LOG = LoggerFactory.getLogger(ScalabilityAbstractSuite.class);
 
     /**
@@ -320,7 +337,7 @@ public abstract class ScalabilityAbstractSuite implements ScalabilitySuite, CSVR
 
             watch.stop();
             result.getBenchmarkStatistics(benchmark).addValue(watch.elapsed(TimeUnit.MILLISECONDS));
-            
+
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Execution time for " + benchmark + "-"
                                             + watch.elapsed(TimeUnit.MILLISECONDS));
@@ -359,6 +376,7 @@ public abstract class ScalabilityAbstractSuite implements ScalabilitySuite, CSVR
                 }
             }
         };
+        thread.setDaemon(true);
         thread.start();
         threads.add(thread);
     }

@@ -55,6 +55,7 @@ import org.apache.jackrabbit.oak.spi.security.ConfigurationParameters;
 import org.apache.jackrabbit.oak.spi.security.SecurityProvider;
 import org.apache.jackrabbit.oak.spi.security.principal.PrincipalImpl;
 import org.apache.jackrabbit.oak.spi.security.user.UserConstants;
+import org.apache.jackrabbit.oak.spi.security.user.util.UserUtil;
 import org.apache.jackrabbit.oak.spi.xml.ImportBehavior;
 import org.apache.jackrabbit.oak.spi.xml.NodeInfo;
 import org.apache.jackrabbit.oak.spi.xml.PropInfo;
@@ -161,8 +162,7 @@ class UserImporter implements ProtectedPropertyImporter, ProtectedNodeImporter, 
     private Map<String, Principal> principals = new HashMap<String, Principal>();
 
     UserImporter(ConfigurationParameters config) {
-        String importBehaviorStr = config.getConfigValue(PARAM_IMPORT_BEHAVIOR, ImportBehavior.NAME_IGNORE);
-        importBehavior = ImportBehavior.valueFromString(importBehaviorStr);
+        importBehavior = UserUtil.getImportBehavior(config);
     }
 
     //----------------------------------------------< ProtectedItemImporter >---
@@ -240,6 +240,12 @@ class UserImporter implements ProtectedPropertyImporter, ProtectedNodeImporter, 
                 }
                 String id = propInfo.getTextValue().getString();
                 Authorizable existing = userManager.getAuthorizable(id);
+                if (existing == null) {
+                    String msg = "Cannot handle protected PropInfo " + propInfo + ". Invalid rep:authorizableId.";
+                    log.warn(msg);
+                    throw new ConstraintViolationException(msg);
+                }
+
                 if (a.getPath().equals(existing.getPath())) {
                     parent.setProperty(REP_AUTHORIZABLE_ID, id);
                 } else {
@@ -321,31 +327,36 @@ class UserImporter implements ProtectedPropertyImporter, ProtectedNodeImporter, 
 
     @Override
     public void propertiesCompleted(@Nonnull Tree protectedParent) throws RepositoryException {
-        Authorizable a = userManager.getAuthorizable(protectedParent);
-        if (a == null) {
-            // not an authorizable
-            return;
-        }
-
-        // make sure the authorizable ID property is always set even if the
-        // authorizable defined by the imported XML didn't provide rep:authorizableID
-        if (!protectedParent.hasProperty(REP_AUTHORIZABLE_ID)) {
-            protectedParent.setProperty(REP_AUTHORIZABLE_ID, a.getID(), Type.STRING);
-        }
-
-        /*
-        Execute authorizable actions for a NEW user at this point after
-        having set the password and the principal name (all protected properties
-        have been processed now).
-        */
-        if (protectedParent.getStatus() == Tree.Status.NEW) {
-            if (a.isGroup()) {
-                userManager.onCreate((Group) a);
-            } else {
-                userManager.onCreate((User) a, currentPw);
+        if (isCacheNode(protectedParent)) {
+            // remove the cache if present
+            protectedParent.remove();
+        } else {
+            Authorizable a = userManager.getAuthorizable(protectedParent);
+            if (a == null) {
+                // not an authorizable
+                return;
             }
+
+            // make sure the authorizable ID property is always set even if the
+            // authorizable defined by the imported XML didn't provide rep:authorizableID
+            if (!protectedParent.hasProperty(REP_AUTHORIZABLE_ID)) {
+                protectedParent.setProperty(REP_AUTHORIZABLE_ID, a.getID(), Type.STRING);
+            }
+
+            /*
+            Execute authorizable actions for a NEW user at this point after
+            having set the password and the principal name (all protected properties
+            have been processed now).
+            */
+            if (protectedParent.getStatus() == Tree.Status.NEW) {
+                if (a.isGroup()) {
+                    userManager.onCreate((Group) a);
+                } else {
+                    userManager.onCreate((User) a, currentPw);
+                }
+            }
+            currentPw = null;
         }
-        currentPw = null;
     }
 
     @Override
@@ -510,6 +521,10 @@ class UserImporter implements ProtectedPropertyImporter, ProtectedNodeImporter, 
         }
         parent.setProperty(property);
         return true;
+    }
+
+    private static boolean isCacheNode(@Nonnull Tree tree) {
+        return tree.exists() && CacheConstants.REP_CACHE.equals(tree.getName()) && CacheConstants.NT_REP_CACHE.equals(TreeUtil.getPrimaryTypeName(tree));
     }
 
     /**

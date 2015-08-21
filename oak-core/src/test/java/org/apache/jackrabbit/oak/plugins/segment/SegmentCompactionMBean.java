@@ -31,6 +31,19 @@ public interface SegmentCompactionMBean {
     void stop();
 
     /**
+     * Set the core pool size of the scheduler used to execute concurrent
+     * operations.
+     * @param corePoolSize
+     */
+    void setCorePoolSize(int corePoolSize);
+
+    /**
+     * @return the core pool size of the scheduler used to execute concurrent
+     * operations.
+     */
+    int getCorePoolSize();
+
+    /**
      * Set the compaction interval
      * @param minutes  number of minutes to wait between compaction cycles.
      */
@@ -94,6 +107,17 @@ public interface SegmentCompactionMBean {
     long getMaxStoreSize();
 
     /**
+     * Set the maximal size of string properties
+     * @param size  size in bytes
+     */
+    void setMaxStringSize(int size);
+
+    /**
+     * @return  maximal size of string properties in bytes
+     */
+    int getMaxStringSize();
+
+    /**
      * Set the maximal size of binary properties
      * @param size  size in bytes
      */
@@ -116,6 +140,94 @@ public interface SegmentCompactionMBean {
     int getMaxReferences();
 
     /**
+     * Maximal number of write operations per scheduled writer
+     * @param count  maximal number of operations
+     */
+    void setMaxWriteOps(int count);
+
+    /**
+     * @return  maximal number of operations
+     */
+    int getMaxWriteOps();
+
+    /**
+     * Set the maximal number of child node of a node
+     * @param count  maximal number of child nodes
+     */
+    void setMaxNodeCount(int count);
+
+    /**
+     * @return  Maximal number of child nodes of a node
+     */
+    int getMaxNodeCount();
+
+    /**
+     * Set the maximal number of properties of a node
+     * @param count  maximal number of properties
+     */
+    void setMaxPropertyCount(int count);
+
+    /**
+     * @return  Maximal number of properties of a node
+     */
+    int getMaxPropertyCount();
+
+    /**
+     * Set the ration of remove node operations wrt. all other operations.
+     * @param ratio  ratio of node remove operations
+     */
+    void setNodeRemoveRatio(int ratio);
+
+    /**
+     * @return  Ratio of node remove operations
+     */
+    int getNodeRemoveRatio();
+
+    /**
+     * Set the ration of remove property operations wrt. all other operations.
+     * @param ratio  ratio of property remove operations
+     */
+    void setPropertyRemoveRatio(int ratio);
+
+    /**
+     * @return  Ratio of property remove operations
+     */
+    int getPropertyRemoveRatio();
+
+    /**
+     * Set the ration of add node operations wrt. all other operations.
+     * @param ratio  ratio of node add operations
+     */
+    void setNodeAddRatio(int ratio);
+
+    /**
+     * @return  Ratio of node add operations
+     */
+    int getNodeAddRatio();
+
+    /**
+     * Set the ration of add string property operations wrt. all other operations.
+     * @param ratio  ratio of string property add operations
+     */
+    void setAddStringRatio(int ratio);
+
+    /**
+     * @return  Ratio of string property add operations
+     */
+    int getAddStringRatio();
+
+    /**
+     * Set the ration of add binary property operations wrt. all other operations.
+     * @param ratio  ratio of binary property add operations
+     */
+    void setAddBinaryRatio(int ratio);
+
+    /**
+     * @return  Ratio of binary property add operations
+     */
+    int getAddBinaryRatio();
+
+    /**
      * Add a reference to the current root or release a held reference.
      * @param set  add a reference if {@code true}, otherwise release any held reference
      */
@@ -125,6 +237,12 @@ public interface SegmentCompactionMBean {
      * @return  {@code true} if currently a root reference is being held. {@code false} otherwise.
      */
     boolean getRootReference();
+
+    /**
+     * Determine whether the compaction map is persisted or in memory
+     * @return  {@code true} if persisted, {@code false} otherwise
+     */
+    boolean getPersistCompactionMap();
 
     /**
      * @return  actual number of concurrent readers
@@ -150,6 +268,16 @@ public interface SegmentCompactionMBean {
      * @return  current weight of the compaction map
      */
     long getCompactionMapWeight();
+
+    /**
+     * @return  number of record referenced by the keys in this map.
+     */
+    long getRecordCount();
+
+    /**
+     * @return  number of segments referenced by the keys in this map.
+     */
+    long getSegmentCount();
 
     /**
      * @return  current depth of the compaction map

@@ -16,6 +16,8 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 import java.io.InputStream;
 import java.util.Set;
 import java.util.concurrent.Executor;
@@ -31,7 +33,6 @@ import com.google.common.cache.Weigher;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.mongodb.DB;
-
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.cache.CacheLIRS;
 import org.apache.jackrabbit.oak.cache.CacheValue;
@@ -58,8 +59,6 @@ import org.apache.jackrabbit.oak.spi.blob.MemoryBlobStore;
 import org.apache.jackrabbit.oak.stats.Clock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * A JSON-based wrapper around the NodeStore implementation that stores the
@@ -465,6 +464,8 @@ public class DocumentMK {
         public static final int DEFAULT_CHILDREN_CACHE_PERCENTAGE = 10;
         public static final int DEFAULT_DIFF_CACHE_PERCENTAGE = 5;
         public static final int DEFAULT_DOC_CHILDREN_CACHE_PERCENTAGE = 3;
+        public static final int DEFAULT_CACHE_SEGMENT_COUNT = 16;
+        public static final int DEFAULT_CACHE_STACK_MOVE_DISTANCE = 16;
         private DocumentNodeStore nodeStore;
         private DocumentStore documentStore;
         private DiffCache diffCache;
@@ -473,14 +474,16 @@ public class DocumentMK {
         private int asyncDelay = 1000;
         private boolean timing;
         private boolean logging;
+        private boolean leaseCheck = true; // OAK-2739 is enabled by default also for non-osgi
         private Weigher<CacheValue, CacheValue> weigher = new EmpiricalWeigher();
         private long memoryCacheSize = DEFAULT_MEMORY_CACHE_SIZE;
         private int nodeCachePercentage = DEFAULT_NODE_CACHE_PERCENTAGE;
         private int childrenCachePercentage = DEFAULT_CHILDREN_CACHE_PERCENTAGE;
         private int diffCachePercentage = DEFAULT_DIFF_CACHE_PERCENTAGE;
         private int docChildrenCachePercentage = DEFAULT_DOC_CHILDREN_CACHE_PERCENTAGE;
+        private int cacheSegmentCount = DEFAULT_CACHE_SEGMENT_COUNT;
+        private int cacheStackMoveDistance = DEFAULT_CACHE_STACK_MOVE_DISTANCE;
         private boolean useSimpleRevision;
-        private long splitDocumentAgeMillis = 5 * 60 * 1000;
         private long offHeapCacheSize = -1;
         private long maxReplicationLagMillis = TimeUnit.HOURS.toMillis(6);
         private boolean disableBranches;
@@ -496,11 +499,9 @@ public class DocumentMK {
          * Use the given MongoDB as backend storage for the DocumentNodeStore.
          *
          * @param db the MongoDB connection
-         * @param changesSizeMB the size in MB of the capped collection backing
-         *                      the MongoDiffCache.
          * @return this
          */
-        public Builder setMongoDB(DB db, int changesSizeMB, int blobCacheSizeMB) {
+        public Builder setMongoDB(DB db, int blobCacheSizeMB) {
             if (db != null) {
                 if (this.documentStore == null) {
                     this.documentStore = new MongoDocumentStore(db, this);
@@ -525,7 +526,7 @@ public class DocumentMK {
          * @return this
          */
         public Builder setMongoDB(DB db) {
-            return setMongoDB(db, 8, 16);
+            return setMongoDB(db, 16);
         }
 
         /**
@@ -601,6 +602,15 @@ public class DocumentMK {
         public boolean getLogging() {
             return logging;
         }
+        
+        public Builder setLeaseCheck(boolean leaseCheck) {
+            this.leaseCheck = leaseCheck;
+            return this;
+        }
+        
+        public boolean getLeaseCheck() {
+            return leaseCheck;
+        }
 
         /**
          * Set the document store to use. By default an in-memory store is used.
@@ -666,6 +676,16 @@ public class DocumentMK {
          */
         public Builder setClusterId(int clusterId) {
             this.clusterId = clusterId;
+            return this;
+        }
+        
+        public Builder setCacheSegmentCount(int cacheSegmentCount) {
+            this.cacheSegmentCount = cacheSegmentCount;
+            return this;
+        }
+        
+        public Builder setCacheStackMoveDistance(int cacheSegmentCount) {
+            this.cacheStackMoveDistance = cacheSegmentCount;
             return this;
         }
 
@@ -756,15 +776,6 @@ public class DocumentMK {
 
         public boolean isUseSimpleRevision() {
             return useSimpleRevision;
-        }
-
-        public Builder setSplitDocumentAgeMillis(long splitDocumentAgeMillis) {
-            this.splitDocumentAgeMillis = splitDocumentAgeMillis;
-            return this;
-        }
-
-        public long getSplitDocumentAgeMillis() {
-            return splitDocumentAgeMillis;
         }
 
         public boolean useOffHeapCache() {
@@ -867,7 +878,7 @@ public class DocumentMK {
                 DocumentNodeStore docNodeStore,
                 DocumentStore docStore
                 ) {
-            Cache<K, V> cache = buildCache(maxWeight);
+            Cache<K, V> cache = buildCache(cacheType.name(), maxWeight);
             PersistentCache p = getPersistentCache();
             if (p != null) {
                 if (docNodeStore != null) {
@@ -894,6 +905,7 @@ public class DocumentMK {
         }
         
         private <K extends CacheValue, V extends CacheValue> Cache<K, V> buildCache(
+                String module,
                 long maxWeight) {
             // by default, use the LIRS cache when using the persistent cache,
             // but don't use it otherwise
@@ -903,10 +915,18 @@ public class DocumentMK {
                 useLirs = LIRS_CACHE;
             }
             if (useLirs) {
-                return CacheLIRS.newBuilder().
-                        weigher(weigher).
+                return CacheLIRS.<K, V>newBuilder().
+                        module(module).
+                        weigher(new Weigher<K, V>() {
+                            @Override
+                            public int weigh(K key, V value) {
+                                return weigher.weigh(key, value);
+                            }
+                        }).
                         averageWeight(2000).
                         maximumWeight(maxWeight).
+                        segmentCount(cacheSegmentCount).
+                        stackMoveDistance(cacheStackMoveDistance).
                         recordStats().
                         build();
             }

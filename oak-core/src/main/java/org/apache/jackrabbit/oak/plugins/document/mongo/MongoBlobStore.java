@@ -140,7 +140,7 @@ public class MongoBlobStore extends CachingBlobStore {
                 new BasicDBObject(MongoBlob.KEY_LAST_MOD, System.currentTimeMillis()));
         WriteResult writeResult = getBlobCollection().update(query, update);
         if (writeResult.getError() != null) {
-            LOG.error("Mark failed for blob %s: %s", id, writeResult.getError());
+            LOG.error("Mark failed for blob {}: {}", id, writeResult.getError());
         }
     }
 
@@ -150,7 +150,7 @@ public class MongoBlobStore extends CachingBlobStore {
         long countBefore = getBlobCollection().count(query);
         WriteResult writeResult = getBlobCollection().remove(query);
         if (writeResult.getError() != null) {
-            LOG.error("Sweep failed: %s", writeResult.getError());
+            LOG.error("Sweep failed: {}", writeResult.getError());
         }
 
         long countAfter = getBlobCollection().count(query);
@@ -205,7 +205,7 @@ public class MongoBlobStore extends CachingBlobStore {
     }
 
     @Override
-    public boolean deleteChunks(List<String> chunkIds, long maxLastModifiedTime) throws Exception {
+    public long countDeleteChunks(List<String> chunkIds, long maxLastModifiedTime) throws Exception {
         DBCollection collection = getBlobCollection();
         QueryBuilder queryBuilder = new QueryBuilder();
         if (chunkIds != null) {
@@ -217,11 +217,7 @@ public class MongoBlobStore extends CachingBlobStore {
         }
 
         WriteResult result = collection.remove(queryBuilder.get());
-        if (result.getN() == chunkIds.size()) {
-            return true;
-        }
-
-        return false;
+        return result.getN();
     }
 
     @Override

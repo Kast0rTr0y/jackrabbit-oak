@@ -72,8 +72,41 @@ import org.slf4j.LoggerFactory;
  * Each test run thus adds nodes and executes different benchmarks. This way we measure time taken for
  * benchmark execution.
  *
- * {# NODE_LEVELS} is a comma separated string property and governs the depth and the number of
- * nodes in the hierarchy.
+ * <p>
+ * The following system JVM properties can be defined to configure the suite.
+ * <ul>
+ * <li>
+ *     <code>loaders</code> - Controls the number of concurrent threads for loading blobs initially.
+ *     Defaults to 1.
+ * </li>
+ * <li>
+ *     <code>testers</code> - Controls the number of concurrent tester threads. Defaults to 1.
+ * </li>
+ * <li>
+ *     <code>nodeLevels</code> - Comma separated string property that governs the depth and the number of
+ *     nodes in the hierarchy. Defaults to 10, 5, 2.
+ * </li>
+ * <li>
+ *     <code>densityLevel</code> - Controls the percentage of root nodes which will have sub nodes created.
+ *     Defaults to 100.
+ * </li>
+ * <li>
+ *     <code>index</code> - Controls if the index definitions are to be created. Defaults to false.
+ * </li>
+ * <li>
+ *      <code>asyncIndex</code> - Controls whether the indexing is async. Defaults to false.
+ * </li>
+ * <li>
+ *     <code>noFullIndex</code> - Controls whether fulltext indexing is enabled or disabled. Defaults to false.
+ * </li>
+ * <li>
+ *     <code>randDate</code> - Controls whether to generate random dates in a range. Defaults to false.
+ * </li>
+ * <li>
+ *     <code>customType</code> - Controls if nodes created in the load have a custom node type. Defaults to false.
+ * </li>
+ * </ul>
+ * </p>
  *
  */
 public class ScalabilityNodeSuite extends ScalabilityAbstractSuite {
@@ -91,9 +124,9 @@ public class ScalabilityNodeSuite extends ScalabilityAbstractSuite {
             .omitEmptyStrings().splitToList(System.getProperty("nodeLevels", "10,5,2"));
 
     /**
-     * Controls the number of concurrent thread for searching
+     * Controls the number of concurrent tester threads
      */
-    protected static final int SEARCHERS = Integer.getInteger("searchers", 1);
+    protected static final int TESTERS = Integer.getInteger("testers", 1);
 
     /**
      * Controls the percentage of root nodes which will have sub nodes created.
@@ -125,8 +158,6 @@ public class ScalabilityNodeSuite extends ScalabilityAbstractSuite {
      * Controls if a customType is to be created
      */
     protected static final boolean CUSTOM_TYPE = Boolean.getBoolean("customType");
-
-    public static final String CTX_SEARCH_PATHS_PROP = "searchPaths";
 
     public static final String CTX_DESC_SEARCH_PATHS_PROP = "descPaths";
 
@@ -370,14 +401,18 @@ public class ScalabilityNodeSuite extends ScalabilityAbstractSuite {
     @Override
     protected void executeBenchmark(final ScalabilityBenchmark benchmark,
             final ExecutionContext context) throws Exception {
-      LOG.info("Stated execution : " + benchmark.toString());
+
+        LOG.info("Started pre benchmark hook : {}", benchmark);
+        benchmark.beforeExecute(getRepository(), CREDENTIALS, context);
+
+        LOG.info("Started execution : {}", benchmark);
         if (PROFILE) {
             context.startProfiler();
         }
         //Execute the benchmark with the number threads configured 
-        List<Thread> threads = newArrayListWithCapacity(SEARCHERS);
-        for (int idx = 0; idx < SEARCHERS; idx++) {
-            Thread t = new Thread("Search-" + idx) {
+        List<Thread> threads = newArrayListWithCapacity(TESTERS);
+        for (int idx = 0; idx < TESTERS; idx++) {
+            Thread t = new Thread("Tester-" + idx) {
                 @Override
                 public void run() {
                     try {
@@ -399,6 +434,9 @@ public class ScalabilityNodeSuite extends ScalabilityAbstractSuite {
             }
         }
         context.stopProfiler();
+
+        LOG.info("Started post benchmark hook : {}", benchmark);
+        benchmark.afterExecute(getRepository(), CREDENTIALS, context);
     }
 
     @Override
@@ -430,17 +468,45 @@ public class ScalabilityNodeSuite extends ScalabilityAbstractSuite {
     }
 
     private synchronized void addRootSearchPath(String path) {
-        if (!searchRootPaths.contains(path)) {
+        int limit = 1000;
+        if (searchRootPaths.size() < limit) {
             searchRootPaths.add(path);
+        } else if (random.nextDouble() < 0.5) {
+            searchRootPaths.set(random.nextInt(limit), path);
         }
     }
 
     private synchronized void addDescSearchPath(String path) {
-        if (!searchDescPaths.contains(path)) {
+        int limit = 1000;
+        if (searchDescPaths.size() < limit) {
             searchDescPaths.add(path);
+        } else if (random.nextDouble() < 0.5) {
+            searchDescPaths.set(random.nextInt(limit), path);
         }
     }
 
+    /**
+     * Creates a node hierarchy as follows:
+     *
+     * <pre>
+     * {@code
+     *  /LongevitySearchAssets<ID>
+     *      /writer<ID>
+     *          /Node<ID>
+     *              jcr:primaryType : <oak:Unstructured|rootType|nt:unstructured>
+     *              added : <DATE>
+     *              viewed : <true|false>
+     *              filter : <true|false>
+     *              title : Node<ID>
+     *              /SubNode<ID>
+     *                  jcr:primaryType : <oak:Unstructured|descendantTypeType|nt:unstructured>
+     *                  added : <DATE>
+     *                  viewed : <true|false>
+     *                  filter : <true|false>
+     *                  title : SubNode<ID>
+     * }
+     * </pre>
+     */
     class Writer implements Runnable {
 
         final Node parent;

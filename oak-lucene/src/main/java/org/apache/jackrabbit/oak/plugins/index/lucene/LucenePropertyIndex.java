@@ -38,6 +38,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
 import org.apache.jackrabbit.oak.api.PropertyValue;
+import org.apache.jackrabbit.oak.api.Result.SizePrecision;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.index.aggregate.NodeAggregator;
@@ -61,6 +62,7 @@ import org.apache.jackrabbit.oak.spi.query.Filter;
 import org.apache.jackrabbit.oak.spi.query.Filter.PropertyRestriction;
 import org.apache.jackrabbit.oak.spi.query.IndexRow;
 import org.apache.jackrabbit.oak.spi.query.PropertyValues;
+import org.apache.jackrabbit.oak.spi.query.QueryConstants;
 import org.apache.jackrabbit.oak.spi.query.QueryIndex;
 import org.apache.jackrabbit.oak.spi.query.QueryIndex.AdvanceFulltextQueryIndex;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
@@ -92,6 +94,7 @@ import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TermRangeQuery;
 import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.search.TotalHitCountCollector;
 import org.apache.lucene.search.WildcardQuery;
 import org.apache.lucene.search.spell.SuggestWord;
 import org.apache.lucene.search.suggest.Lookup;
@@ -408,9 +411,9 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
 
                         // ACL filter suggestions
                         Collection<String> suggestedWords = new ArrayList<String>(lookupResults.size());
-                        QueryParser qp = new QueryParser(Version.LUCENE_47, FieldNames.FULLTEXT, indexNode.getDefinition().getAnalyzer());
+                        QueryParser qp = new QueryParser(Version.LUCENE_47, FieldNames.SUGGEST, indexNode.getDefinition().getAnalyzer());
                         for (Lookup.LookupResult suggestion : lookupResults) {
-                            Query query = qp.createPhraseQuery(FieldNames.FULLTEXT, suggestion.key.toString());
+                            Query query = qp.createPhraseQuery(FieldNames.SUGGEST, suggestion.key.toString());
                             TopDocs topDocs = searcher.search(query, 100);
                             if (topDocs.totalHits > 0) {
                                 for (ScoreDoc doc : topDocs.scoreDocs) {
@@ -449,7 +452,32 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                 this.lastSearchIndexerVersion = currentVersion;
             }
         };
-        return new LucenePathCursor(itr, plan, settings);
+        SizeEstimator sizeEstimator = new SizeEstimator() {
+            @Override
+            public long getSize() {
+                IndexNode indexNode = acquireIndexNode(plan);
+                checkState(indexNode != null);
+                try {
+                    IndexSearcher searcher = indexNode.getSearcher();
+                    LuceneRequestFacade luceneRequestFacade = getLuceneRequest(plan, searcher.getIndexReader());
+                    if (luceneRequestFacade.getLuceneRequest() instanceof Query) {
+                        Query query = (Query) luceneRequestFacade.getLuceneRequest();
+                        TotalHitCountCollector collector = new TotalHitCountCollector();
+                        searcher.search(query, collector);
+                        int totalHits =  collector.getTotalHits();
+                        LOG.debug("Estimated size for query {} is {}", query, totalHits);
+                        return totalHits;
+                    }
+                    LOG.debug("estimate size: not a Query: {}", luceneRequestFacade.getLuceneRequest());
+                } catch (IOException e) {
+                    LOG.warn("query via {} failed.", LucenePropertyIndex.this, e);
+                } finally {
+                    indexNode.release();
+                }
+                return -1;
+            }
+        };
+        return new LucenePathCursor(itr, plan, settings, sizeEstimator);
     }
 
     @Override
@@ -697,6 +725,9 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
             if ("rep:excerpt".equals(name)) {
                 continue;
             }
+            if (QueryConstants.RESTRICTION_LOCAL_NAME.equals(name)) {
+                continue;
+            }
 
             if (pr.first != null && pr.first.equals(pr.last) && pr.firstIncluding
                     && pr.lastIncluding) {
@@ -712,7 +743,7 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                     continue;
                 }
             }
-
+            
             PropertyDefinition pd = planResult.getPropDefn(pr);
             if (pd == null) {
                 continue;
@@ -1169,9 +1200,12 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
         private final Cursor pathCursor;
         private final String pathPrefix;
         LuceneResultRow currentRow;
+        private final SizeEstimator sizeEstimator;
+        private long estimatedSize;
 
-        LucenePathCursor(final Iterator<LuceneResultRow> it, final IndexPlan plan, QueryEngineSettings settings) {
+        LucenePathCursor(final Iterator<LuceneResultRow> it, final IndexPlan plan, QueryEngineSettings settings, SizeEstimator sizeEstimator) {
             pathPrefix = plan.getPathPrefix();
+            this.sizeEstimator = sizeEstimator;
             Iterator<String> pathIterator = new Iterator<String>() {
 
                 @Override
@@ -1233,6 +1267,15 @@ public class LucenePropertyIndex implements AdvancedQueryIndex, QueryIndex, Nati
                 }
 
             };
+        }
+
+
+        @Override
+        public long getSize(SizePrecision precision, long max) {
+            if (estimatedSize != 0) {
+                return estimatedSize;
+            }
+            return estimatedSize = sizeEstimator.getSize();
         }
     }
 

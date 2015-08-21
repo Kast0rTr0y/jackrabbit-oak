@@ -29,6 +29,7 @@ import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
 import static org.apache.jackrabbit.oak.commons.IOUtils.humanReadableByteCount;
 import static org.apache.jackrabbit.oak.plugins.memory.EmptyNodeState.EMPTY_NODE;
+import static org.apache.jackrabbit.oak.plugins.segment.CompactionMap.sum;
 import static org.apache.jackrabbit.oak.plugins.segment.compaction.CompactionStrategy.NO_COMPACTION;
 
 import java.io.File;
@@ -56,8 +57,9 @@ import com.google.common.base.Stopwatch;
 import com.google.common.collect.Maps;
 import org.apache.jackrabbit.oak.api.Blob;
 import org.apache.jackrabbit.oak.plugins.blob.BlobStoreBlob;
-import org.apache.jackrabbit.oak.plugins.segment.CompactionMap;
 import org.apache.jackrabbit.oak.plugins.segment.Compactor;
+import org.apache.jackrabbit.oak.plugins.segment.CompactionMap;
+import org.apache.jackrabbit.oak.plugins.segment.PersistedCompactionMap;
 import org.apache.jackrabbit.oak.plugins.segment.RecordId;
 import org.apache.jackrabbit.oak.plugins.segment.Segment;
 import org.apache.jackrabbit.oak.plugins.segment.SegmentId;
@@ -432,10 +434,10 @@ public class FileStore implements SegmentStore {
 
         Runtime runtime = Runtime.getRuntime();
         long avail = runtime.totalMemory() - runtime.freeMemory();
-        long delta = 0;
-        if (compactionStrategy.getCompactionMap() != null) {
-            delta = compactionStrategy.getCompactionMap().getLastMergeWeight();
-        }
+        long[] weights = tracker.getCompactionMap().getEstimatedWeights();
+        long delta = weights.length > 0
+            ? weights[0]
+            : 0;
         long needed = delta * compactionStrategy.getMemoryThreshold();
         if (needed >= avail) {
             gcMonitor.skipped(
@@ -453,28 +455,45 @@ public class FileStore implements SegmentStore {
         compactionStrategy.setCompactionStart(System.currentTimeMillis());
         boolean compacted = false;
 
-        CompactionGainEstimate estimate = estimateCompactionGain();
-        long gain = estimate.estimateCompactionGain();
-        if (gain >= 10) {
-            gcMonitor.info(
+        long offset = compactionStrategy.getPersistCompactionMap()
+            ? sum(tracker.getCompactionMap().getRecordCounts()) * PersistedCompactionMap.BYTES_PER_ENTRY
+            : 0;
+
+        byte gainThreshold = compactionStrategy.getGainThreshold();
+        boolean runCompaction = true;
+        if (gainThreshold > 0) {
+            CompactionGainEstimate estimate = estimateCompactionGain();
+            long gain = estimate.estimateCompactionGain(offset);
+            runCompaction = gain >= gainThreshold;
+            if (runCompaction) {
+                gcMonitor.info(
                     "Estimated compaction in {}, gain is {}% ({}/{}) or ({}/{}), so running compaction",
-                    watch, gain, estimate.getReachableSize(),
-                    estimate.getTotalSize(),
-                    humanReadableByteCount(estimate.getReachableSize()),
-                    humanReadableByteCount(estimate.getTotalSize()));
+                    watch, gain, estimate.getReachableSize(), estimate.getTotalSize(),
+                    humanReadableByteCount(estimate.getReachableSize()), humanReadableByteCount(estimate.getTotalSize()));
+            } else {
+                if (estimate.getTotalSize() == 0) {
+                    gcMonitor.skipped(
+                        "Estimated compaction in {}. Skipping compaction for now as repository consists " +
+                        "of a single tar file only", watch);
+                } else {
+                    gcMonitor.skipped(
+                        "Estimated compaction in {}, gain is {}% ({}/{}) or ({}/{}), so skipping compaction for now",
+                        watch, gain, estimate.getReachableSize(), estimate.getTotalSize(),
+                        humanReadableByteCount(estimate.getReachableSize()), humanReadableByteCount(estimate.getTotalSize()));
+                }
+            }
+        } else {
+            gcMonitor.info("Compaction estimation is skipped due to threshold value ({}). Running compaction",
+                gainThreshold);
+        }
+
+        if (runCompaction) {
             if (!compactionStrategy.isPaused()) {
                 compact();
                 compacted = true;
             } else {
                 gcMonitor.skipped("TarMK compaction paused");
             }
-        } else {
-            gcMonitor.skipped(
-                    "Estimated compaction in {}, gain is {}% ({}/{}) or ({}/{}), so skipping compaction for now",
-                    watch, gain, estimate.getReachableSize(),
-                    estimate.getTotalSize(),
-                    humanReadableByteCount(estimate.getReachableSize()),
-                    humanReadableByteCount(estimate.getTotalSize()));
         }
         if (cleanup) {
             cleanupNeeded.set(true);
@@ -553,7 +572,7 @@ public class FileStore implements SegmentStore {
         return dataFiles;
     }
 
-    public synchronized long size() throws IOException {
+    public synchronized long size() {
         long size = writeFile.length();
         for (TarReader reader : readers) {
             size += reader.size();
@@ -634,52 +653,65 @@ public class FileStore implements SegmentStore {
      * A new generation of a tar file is created (and segments are only
      * discarded) if doing so releases more than 25% of the space in a tar file.
      */
-    public synchronized void cleanup() throws IOException {
+    public void cleanup() throws IOException {
         Stopwatch watch = Stopwatch.createStarted();
         long initialSize = size();
-        gcMonitor.info("TarMK revision cleanup started. Current repository size {}",
-                humanReadableByteCount(initialSize));
-
-        newWriter();
-        tracker.clearCache();
-
-        // Suggest to the JVM that now would be a good time
-        // to clear stale weak references in the SegmentTracker
-        System.gc();
-
-        Set<UUID> ids = newHashSet();
-        for (SegmentId id : tracker.getReferencedSegmentIds()) {
-            ids.add(new UUID(
-                    id.getMostSignificantBits(),
-                    id.getLeastSignificantBits()));
-        }
-        writer.collectReferences(ids);
-
         CompactionMap cm = tracker.getCompactionMap();
-        List<TarReader> list = newArrayListWithCapacity(readers.size());
         Set<UUID> cleanedIds = newHashSet();
-        for (TarReader reader : readers) {
-            TarReader cleaned = reader.cleanup(ids, cm, cleanedIds);
-            if (cleaned == reader) {
-                list.add(reader);
-            } else {
-                if (cleaned != null) {
-                    list.add(cleaned);
-                }
-                File file = reader.close();
-                gcMonitor.info("TarMK revision cleanup reclaiming {}", file.getName());
-                toBeRemoved.addLast(file);
+
+        synchronized (this) {
+            gcMonitor.info("TarMK revision cleanup started. Current repository size {}",
+                    humanReadableByteCount(initialSize));
+
+            newWriter();
+            tracker.clearCache();
+
+            // Suggest to the JVM that now would be a good time
+            // to clear stale weak references in the SegmentTracker
+            System.gc();
+
+            Set<UUID> ids = newHashSet();
+            for (SegmentId id : tracker.getReferencedSegmentIds()) {
+                ids.add(new UUID(
+                        id.getMostSignificantBits(),
+                        id.getLeastSignificantBits()));
             }
+            writer.collectReferences(ids);
+
+            List<TarReader> list = newArrayListWithCapacity(readers.size());
+            for (TarReader reader : readers) {
+                TarReader cleaned = reader.cleanup(ids, cm, cleanedIds);
+                if (cleaned == reader) {
+                    list.add(reader);
+                } else {
+                    if (cleaned != null) {
+                        list.add(cleaned);
+                    }
+                    File file = reader.close();
+                    gcMonitor.info("TarMK revision cleanup reclaiming {}", file.getName());
+                    toBeRemoved.addLast(file);
+                }
+            }
+            readers = list;
         }
-        cm.compress(cleanedIds);
-        readers = list;
+
+        // Do this outside sync to avoid deadlock with SegmentId.getSegment(). See OAK-3179
+        cm.remove(cleanedIds);
         long finalSize = size();
         gcMonitor.cleaned(initialSize - finalSize, finalSize);
         gcMonitor.info("TarMK revision cleanup completed in {}. Post cleanup size is {} " +
                 "and space reclaimed {}. Compaction map weight/depth is {}/{}.", watch,
                 humanReadableByteCount(finalSize),
                 humanReadableByteCount(initialSize - finalSize),
-                humanReadableByteCount(cm.getEstimatedWeight()), cm.getDepth());
+                humanReadableByteCount(sum(cm.getEstimatedWeights())),
+                cm.getDepth());
+    }
+
+    /**
+     * @return  a new {@link SegmentWriter} instance for writing to this store.
+     */
+    public SegmentWriter createSegmentWriter() {
+        return new SegmentWriter(this, tracker, getVersion());
     }
 
     /**
@@ -693,8 +725,7 @@ public class FileStore implements SegmentStore {
         gcMonitor.info("TarMK compaction running, strategy={}", compactionStrategy);
 
         long start = System.currentTimeMillis();
-        SegmentWriter writer = new SegmentWriter(this, tracker, getVersion());
-        final Compactor compactor = new Compactor(writer, compactionStrategy.cloneBinaries());
+        Compactor compactor = new Compactor(this, compactionStrategy);
         SegmentNodeState before = getHead();
         long existing = before.getChildNode(SegmentNodeStore.CHECKPOINTS)
                 .getChildNodeCount(Long.MAX_VALUE);
@@ -704,7 +735,7 @@ public class FileStore implements SegmentStore {
                     existing);
         }
 
-        SegmentNodeState after = compactor.compact(EMPTY_NODE, before);
+        SegmentNodeState after = compactor.compact(EMPTY_NODE, before, EMPTY_NODE);
 
         Callable<Boolean> setHead = new SetHead(before, after, compactor);
         try {
@@ -718,7 +749,8 @@ public class FileStore implements SegmentStore {
                 gcMonitor.info("TarMK compaction detected concurrent commits while compacting. " +
                         "Compacting these commits. Cycle {}", cycles);
                 SegmentNodeState head = getHead();
-                after = compactor.compact(after, head);
+                after = compactor.compact(before, head, after);
+                before = head;
                 setHead = new SetHead(head, after, compactor);
             }
             if (!success) {
@@ -726,7 +758,7 @@ public class FileStore implements SegmentStore {
                         "{} cycles.", cycles - 1);
                 if (compactionStrategy.getForceAfterFail()) {
                     gcMonitor.info("TarMK compaction force compacting remaining commits");
-                    if (!forceCompact(after, compactor)) {
+                    if (!forceCompact(before, after, compactor)) {
                         gcMonitor.warn("TarMK compaction failed to force compact remaining commits. " +
                                 "Most likely compaction didn't get exclusive access to the store.");
                     }
@@ -740,11 +772,11 @@ public class FileStore implements SegmentStore {
         }
     }
 
-    private boolean forceCompact(final SegmentNodeState before, final Compactor compactor) throws Exception {
+    private boolean forceCompact(final NodeState before, final SegmentNodeState onto, final Compactor compactor) throws Exception {
         return compactionStrategy.compacted(new Callable<Boolean>() {
             @Override
             public Boolean call() throws Exception {
-                return new SetHead(getHead(), compactor.compact(before, getHead()), compactor).call();
+                return new SetHead(getHead(), compactor.compact(before, getHead(), onto), compactor).call();
             }
         });
     }
@@ -859,6 +891,13 @@ public class FileStore implements SegmentStore {
 
         for (TarReader reader : readers) {
             try {
+                if (reader.isClosed()) {
+                    // Cleanup might already have closed the file.
+                    // The segment should be available from another file.
+                    log.debug("Skipping closed tar file {}", reader);
+                    continue;
+                }
+
                 ByteBuffer buffer = reader.readEntry(msb, lsb);
                 if (buffer != null) {
                     return new Segment(tracker, id, buffer);
@@ -883,6 +922,13 @@ public class FileStore implements SegmentStore {
         // so we need to re-check the readers
         for (TarReader reader : readers) {
             try {
+                if (reader.isClosed()) {
+                    // Cleanup might already have closed the file.
+                    // The segment should be available from another file.
+                    log.info("Skipping closed tar file {}", reader);
+                    continue;
+                }
+
                 ByteBuffer buffer = reader.readEntry(msb, lsb);
                 if (buffer != null) {
                     return new Segment(tracker, id, buffer);
@@ -978,6 +1024,7 @@ public class FileStore implements SegmentStore {
 
     public FileStore setCompactionStrategy(CompactionStrategy strategy) {
         this.compactionStrategy = strategy;
+        log.info("Compaction strategy set to: {}", strategy);
         return this;
     }
 
@@ -1062,16 +1109,16 @@ public class FileStore implements SegmentStore {
             // needs to be called inside the commitSemaphore as doing otherwise
             // might result in mixed segments. See OAK-2192.
             if (setHead(before, after)) {
-                CompactionMap cm = compactor.getCompactionMap();
-                tracker.setCompactionMap(cm);
-                compactionStrategy.setCompactionMap(cm);
+                tracker.setCompactionMap(compactor.getCompactionMap());
 
                 // Drop the SegmentWriter caches and flush any existing state
                 // in an attempt to prevent new references to old pre-compacted
-                // content. TODO: There should be a cleaner way to do this.
+                // content. TODO: There should be a cleaner way to do this. (implement GCMonitor!?)
                 tracker.getWriter().dropCache();
                 tracker.getWriter().flush();
-                gcMonitor.compacted();
+
+                CompactionMap cm = tracker.getCompactionMap();
+                gcMonitor.compacted(cm.getSegmentCounts(), cm.getRecordCounts(), cm.getEstimatedWeights());
                 tracker.clearSegmentIdTables(compactionStrategy);
                 return true;
             } else {
@@ -1111,8 +1158,8 @@ public class FileStore implements SegmentStore {
         }
 
         @Override
-        public void compacted() {
-            delegatee.compacted();
+        public void compacted(long[] segmentCounts, long[] recordCounts, long[] compactionMapWeights) {
+            delegatee.compacted(segmentCounts, recordCounts, compactionMapWeights);
         }
 
         @Override

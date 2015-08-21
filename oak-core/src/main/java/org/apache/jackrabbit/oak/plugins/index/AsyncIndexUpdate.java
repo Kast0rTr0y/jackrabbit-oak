@@ -277,6 +277,9 @@ public class AsyncIndexUpdate implements Runnable {
             return;
         }
 
+        // start collecting runtime statistics
+        preAsyncRunStatsStats(indexStats);
+
         // find the last indexed state, and check if there are recent changes
         NodeState before;
         String beforeCheckpoint = async.getString(name);
@@ -292,6 +295,7 @@ public class AsyncIndexUpdate implements Runnable {
                 log.debug(
                         "[{}] No changes since last checkpoint; skipping the index update",
                         name);
+                postAsyncRunStatsStatus(indexStats);
                 return;
             } else {
                 before = state;
@@ -303,21 +307,31 @@ public class AsyncIndexUpdate implements Runnable {
 
         // there are some recent changes, so let's create a new checkpoint
         String afterTime = now();
+        String oldThreadName = Thread.currentThread().getName();
+        boolean threadNameChanged = false;
         String afterCheckpoint = store.checkpoint(lifetime, ImmutableMap.of(
                 "creator", AsyncIndexUpdate.class.getSimpleName(),
-                "thread", Thread.currentThread().getName(),
+                "thread", oldThreadName,
                 "name", name));
         NodeState after = store.retrieve(afterCheckpoint);
         if (after == null) {
             log.debug(
                     "[{}] Unable to retrieve newly created checkpoint {}, skipping the index update",
                     name, afterCheckpoint);
+            //Do not update the status as technically the run is not complete
             return;
         }
 
         String checkpointToRelease = afterCheckpoint;
+        boolean updatePostRunStatus = false;
         try {
-            updateIndex(before, beforeCheckpoint, after, afterCheckpoint, afterTime);
+            String newThreadName = "aysnc-index-update-" + name;
+            log.trace("Switching thread name to {}", newThreadName);
+            threadNameChanged = true;
+            Thread.currentThread().setName(newThreadName);
+            
+            updatePostRunStatus = updateIndex(before, beforeCheckpoint,
+                    after, afterCheckpoint, afterTime);
 
             // the update succeeded, i.e. it no longer fails
             if (failing) {
@@ -344,6 +358,10 @@ public class AsyncIndexUpdate implements Runnable {
             }
 
         } finally {
+            if (threadNameChanged) {
+                log.trace("Switching thread name back to {}", oldThreadName);
+                Thread.currentThread().setName(oldThreadName);
+            }
             // null during initial indexing
             // and skip release if this cp was used in a split operation
             if (checkpointToRelease != null
@@ -354,18 +372,20 @@ public class AsyncIndexUpdate implements Runnable {
                             checkpointToRelease);
                 }
             }
+
+            if (updatePostRunStatus) {
+                postAsyncRunStatsStatus(indexStats);
+            }
         }
     }
 
-    private void updateIndex(
+    private boolean updateIndex(
             NodeState before, String beforeCheckpoint,
             NodeState after, String afterCheckpoint, String afterTime)
             throws CommitFailedException {
         Stopwatch watch = Stopwatch.createStarted();
+        boolean updatePostRunStatus = true;
         boolean progressLogged = false;
-        // start collecting runtime statistics
-        preAsyncRunStatsStats(indexStats);
-
         // create an update callback for tracking index updates
         // and maintaining the update lease
         AsyncUpdateCallback callback =
@@ -389,7 +409,6 @@ public class AsyncIndexUpdate implements Runnable {
 
             builder.child(ASYNC).setProperty(name, afterCheckpoint);
             builder.child(ASYNC).setProperty(PropertyStates.createProperty(lastIndexedTo, afterTime, Type.DATE));
-            boolean updatePostRunStatus = true;
             if (callback.isDirty() || before == MISSING_NODE) {
                 if (switchOnSync) {
                     reindexedDefinitions.addAll(indexUpdate
@@ -419,9 +438,6 @@ public class AsyncIndexUpdate implements Runnable {
                 updatePostRunStatus = true;
             }
             mergeWithConcurrencyCheck(builder, beforeCheckpoint, callback.lease);
-            if (updatePostRunStatus) {
-                postAsyncRunStatsStatus(indexStats);
-            }
             if (indexUpdate.isReindexingPerformed()) {
                 log.info("[{}] Reindexing completed for indexes: {} in {}",
                         name, indexUpdate.getReindexStats(), watch);
@@ -440,6 +456,8 @@ public class AsyncIndexUpdate implements Runnable {
                 log.debug(msg, name, watch, callback.updates);
             }
         }
+
+        return updatePostRunStatus;
     }
 
     private void mergeWithConcurrencyCheck(
@@ -464,7 +482,16 @@ public class AsyncIndexUpdate implements Runnable {
                 new ConflictHook(new AnnotatingConflictHandler()),
                 new EditorHook(new ConflictValidatorProvider()),
                 concurrentUpdateCheck);
-        store.merge(builder, hooks, CommitInfo.EMPTY);
+        try {
+            store.merge(builder, hooks, CommitInfo.EMPTY);
+        } catch (CommitFailedException ex) {
+            // OAK-2961
+            if (ex.isOfType(CommitFailedException.STATE) && ex.getCode() == 1) {
+                throw CONCURRENT_UPDATE;
+            } else {
+                throw ex;
+            }
+        }
     }
 
     private static void preAsyncRunStatsStats(AsyncIndexStats stats) {
@@ -777,7 +804,7 @@ public class AsyncIndexUpdate implements Runnable {
                 return;
             }
             throw new CommitFailedException("Async", 2,
-                    "Missing index provider detected");
+                    "Missing index provider detected for type ["+type+"]");
         }
     }
 

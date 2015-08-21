@@ -28,8 +28,12 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Timestamp;
+import java.text.DateFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -60,6 +64,8 @@ import joptsimple.ArgumentAcceptingOptionSpec;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 import joptsimple.OptionSpec;
+
+import org.apache.commons.lang.time.DateUtils;
 import org.apache.jackrabbit.core.RepositoryContext;
 import org.apache.jackrabbit.core.config.RepositoryConfig;
 import org.apache.jackrabbit.oak.Oak;
@@ -99,6 +105,9 @@ import org.apache.jackrabbit.oak.plugins.segment.compaction.CompactionStrategy.C
 import org.apache.jackrabbit.oak.plugins.segment.file.FileStore;
 import org.apache.jackrabbit.oak.plugins.segment.standby.client.StandbyClient;
 import org.apache.jackrabbit.oak.plugins.segment.standby.server.StandbyServer;
+import org.apache.jackrabbit.oak.remote.content.ContentRemoteRepository;
+import org.apache.jackrabbit.oak.remote.http.RemoteServlet;
+import org.apache.jackrabbit.oak.plugins.tika.TextExtractorMain;
 import org.apache.jackrabbit.oak.scalability.ScalabilityRunner;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
@@ -186,6 +195,9 @@ public final class Main {
                 break;
             case REPAIR:
                 repair(args);
+                break;
+            case TIKA:
+                TextExtractorMain.main(args);
                 break;
             case HELP:
             default:
@@ -933,6 +945,8 @@ public final class Main {
     private static void upgrade(String[] args) throws Exception {
         OptionParser parser = new OptionParser();
         parser.accepts("datastore", "keep data store");
+        ArgumentAcceptingOptionSpec<String> copyVersions = parser.accepts("copy-versions", "copy referenced versions. valid arguments: true|false|yyyy-mm-dd").withRequiredArg().defaultsTo("true");
+        ArgumentAcceptingOptionSpec<String> copyOrphanedVersions = parser.accepts("copy-orphaned-versions", "copy all versions. valid arguments: true|false|yyyy-mm-dd").withRequiredArg().defaultsTo("true");
         OptionSpec<String> nonOption = parser.nonOptions();
         OptionSet options = parser.parse(args);
 
@@ -947,7 +961,7 @@ public final class Main {
             }
 
             RepositoryContext source =
-                    RepositoryContext.create(RepositoryConfig.create(dir, xml));
+                    RepositoryContext.create(RepositoryConfig.create(xml, dir));
             try {
                 if (dst.startsWith("mongodb://")) {
                     MongoClientURI uri = new MongoClientURI(dst);
@@ -961,6 +975,7 @@ public final class Main {
                                     new RepositoryUpgrade(source, target);
                             upgrade.setCopyBinariesByReference(
                                     options.has("datastore"));
+                            setCopyVersionOptions(copyVersions.value(options), copyOrphanedVersions.value(options), upgrade);
                             upgrade.copy(null);
                         } finally {
                             target.dispose();
@@ -988,6 +1003,26 @@ public final class Main {
             System.err.println("usage: upgrade <olddir> <newdir>");
             System.exit(1);
         }
+    }
+
+    private static void setCopyVersionOptions(String copyVersions, String copyOrphanedVersions, RepositoryUpgrade upgrade) throws ParseException {
+        upgrade.setCopyVersions(parseVersionCopyArgument(copyVersions));
+        upgrade.setCopyOrphanedVersions(parseVersionCopyArgument(copyOrphanedVersions));
+    }
+
+    static Calendar parseVersionCopyArgument(String string) throws ParseException {
+        final DateFormat df = new SimpleDateFormat("yyyy-MM-dd");
+        final Calendar calendar;
+
+        if (Boolean.parseBoolean(string)) {
+            calendar = Calendar.getInstance();
+            calendar.setTimeInMillis(0);
+        } else if (string != null && string.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
+            calendar = DateUtils.toCalendar(df.parse(string));
+        } else {
+            calendar = null;
+        }
+        return calendar;
     }
 
     private static void server(String defaultUri, String[] args) throws Exception {
@@ -1125,9 +1160,12 @@ public final class Main {
             Jcr jcr = new Jcr(oak);
 
             // 1 - OakServer
-            ContentRepository repository = oak.createContentRepository();
+            ContentRepository repository = jcr.createContentRepository();
             ServletHolder holder = new ServletHolder(new OakServlet(repository));
             context.addServlet(holder, path + "/*");
+
+            ServletHolder remoteServlet = new ServletHolder(new RemoteServlet(new ContentRemoteRepository(repository)));
+            context.addServlet(remoteServlet, path + "/api/*");
 
             // 2 - Webdav Server on JCR repository
             final Repository jcrRepository = jcr.createRepository();
@@ -1175,7 +1213,8 @@ public final class Main {
         HELP("help"),
         CHECKPOINTS("checkpoints"),
         RECOVERY("recovery"),
-        REPAIR("repair");
+        REPAIR("repair"),
+        TIKA("tika");
 
         private final String name;
 

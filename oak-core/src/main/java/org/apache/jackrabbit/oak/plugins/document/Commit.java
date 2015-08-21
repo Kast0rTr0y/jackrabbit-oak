@@ -40,7 +40,9 @@ import org.slf4j.LoggerFactory;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Iterables.transform;
+import static java.util.Collections.singletonList;
 import static org.apache.jackrabbit.oak.commons.PathUtils.denotesRoot;
+import static org.apache.jackrabbit.oak.plugins.document.Collection.JOURNAL;
 import static org.apache.jackrabbit.oak.plugins.document.Collection.NODES;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.COLLISIONS;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.SPLIT_CANDIDATE_THRESHOLD;
@@ -52,7 +54,7 @@ public class Commit {
 
     private static final Logger LOG = LoggerFactory.getLogger(Commit.class);
 
-    private final DocumentNodeStore nodeStore;
+    protected final DocumentNodeStore nodeStore;
     private final DocumentNodeStoreBranch branch;
     private final Revision baseRevision;
     private final Revision revision;
@@ -128,6 +130,15 @@ public class Commit {
         return baseRevision;
     }
 
+    /**
+     * @return all modified paths, including ancestors without explicit
+     *          modifications.
+     */
+    @Nonnull
+    Iterable<String> getModifiedPaths() {
+        return modifiedNodes;
+    }
+
     void addNodeDiff(DocumentNodeState n) {
         diff.tag('+').key(n.getPath());
         diff.object();
@@ -181,6 +192,11 @@ public class Commit {
                 // baseRev is marker for new branch
                 b = nodeStore.getBranches().create(
                         baseRev.asTrunkRevision(), rev, branch);
+                LOG.debug("Branch created with base revision {} and " +
+                        "modifications on {}", baseRevision, operations.keySet());
+                if (LOG.isTraceEnabled()) {
+                    LOG.trace("Branch created", new Exception());
+                }
             } else {
                 b.addCommit(rev);
             }
@@ -270,7 +286,7 @@ public class Commit {
         // so that all operations can be rolled back if there is a conflict
         ArrayList<UpdateOp> opLog = new ArrayList<UpdateOp>();
 
-        //Compute the commit root
+        // Compute the commit root
         for (String p : operations.keySet()) {
             markChanged(p);
             if (commitRootPath == null) {
@@ -284,6 +300,16 @@ public class Commit {
                 }
             }
         }
+
+        // push branch changes to journal
+        if (baseBranchRevision != null) {
+            // store as external change
+            JournalEntry doc = JOURNAL.newDocument(store);
+            doc.modified(modifiedNodes);
+            Revision r = revision.asBranchRevision();
+            store.create(JOURNAL, singletonList(doc.asUpdateOp(r)));
+        }
+
         int commitRootDepth = PathUtils.getDepth(commitRootPath);
         // check if there are real changes on the commit root
         boolean commitRootHasChanges = operations.containsKey(commitRootPath);
@@ -315,6 +341,7 @@ public class Commit {
             NodeDocument.setRevision(commitRoot, revision, commitValue);
             newNodes.add(commitRoot);
         }
+        boolean success = false;
         try {
             if (newNodes.size() > 0) {
                 // set commit root on new nodes
@@ -357,7 +384,7 @@ public class Commit {
                     // to set isNew to false. If we get here the
                     // commitRoot document already exists and
                     // only needs an update
-                    UpdateOp commit = commitRoot.shallowCopy(commitRoot.getId());
+                    UpdateOp commit = commitRoot.copy();
                     commit.setNew(false);
                     // only set revision on commit root when there is
                     // no collision for this commit revision
@@ -368,6 +395,7 @@ public class Commit {
                                 "Update operation failed: " + commitRoot;
                         throw new DocumentStoreException(msg);
                     } else {
+                        success = true;
                         // if we get here the commit was successful and
                         // the commit revision is set on the commitRoot
                         // document for this commit.
@@ -385,8 +413,13 @@ public class Commit {
                 operations.put(commitRootPath, commitRoot);
             }
         } catch (DocumentStoreException e) {
-            rollback(newNodes, opLog, commitRoot);
-            throw e;
+            // OAK-3084 do not roll back if already committed
+            if (success) {
+                LOG.error("Exception occurred after commit. Rollback will be suppressed.", e);
+            } else {
+                rollback(newNodes, opLog, commitRoot);
+                throw e;
+            }
         }
     }
 
@@ -415,10 +448,14 @@ public class Commit {
         DocumentStore store = nodeStore.getDocumentStore();
         for (UpdateOp op : changed) {
             UpdateOp reverse = op.getReverseOperation();
+            if (op.isNew()) {
+                NodeDocument.setDeletedOnce(reverse);
+            }
             store.findAndUpdate(NODES, reverse);
         }
         for (UpdateOp op : newDocuments) {
             UpdateOp reverse = op.getReverseOperation();
+            NodeDocument.setDeletedOnce(reverse);
             store.findAndUpdate(NODES, reverse);
         }
         UpdateOp removeCollision = new UpdateOp(commitRoot.getId(), false);
@@ -569,7 +606,7 @@ public class Commit {
             }
             list.add(p);
         }
-        DiffCache.Entry cacheEntry = nodeStore.getDiffCache().newEntry(before, revision);
+        DiffCache.Entry cacheEntry = nodeStore.getDiffCache().newEntry(before, revision, true);
         LastRevTracker tracker = nodeStore.createTracker(revision, isBranchCommit);
         List<String> added = new ArrayList<String>();
         List<String> removed = new ArrayList<String>();

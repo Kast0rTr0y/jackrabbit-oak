@@ -17,7 +17,6 @@
 package org.apache.jackrabbit.oak.security.authorization.permission;
 
 import java.security.Principal;
-import java.util.Collections;
 import java.util.Set;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -29,7 +28,8 @@ import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.plugins.tree.RootFactory;
 import org.apache.jackrabbit.oak.plugins.tree.TreeLocation;
 import org.apache.jackrabbit.oak.plugins.version.VersionConstants;
-import org.apache.jackrabbit.oak.spi.security.authorization.AuthorizationConfiguration;
+import org.apache.jackrabbit.oak.spi.security.ConfigurationParameters;
+import org.apache.jackrabbit.oak.spi.security.Context;
 import org.apache.jackrabbit.oak.spi.security.authorization.accesscontrol.AccessControlConstants;
 import org.apache.jackrabbit.oak.spi.security.authorization.permission.AggregatedPermissionProvider;
 import org.apache.jackrabbit.oak.spi.security.authorization.permission.PermissionConstants;
@@ -37,9 +37,10 @@ import org.apache.jackrabbit.oak.spi.security.authorization.permission.Permissio
 import org.apache.jackrabbit.oak.spi.security.authorization.permission.Permissions;
 import org.apache.jackrabbit.oak.spi.security.authorization.permission.RepositoryPermission;
 import org.apache.jackrabbit.oak.spi.security.authorization.permission.TreePermission;
-import org.apache.jackrabbit.oak.spi.security.principal.AdminPrincipal;
-import org.apache.jackrabbit.oak.spi.security.principal.SystemPrincipal;
+import org.apache.jackrabbit.oak.spi.security.authorization.restriction.RestrictionProvider;
 import org.apache.jackrabbit.oak.spi.security.privilege.PrivilegeBits;
+import org.apache.jackrabbit.oak.spi.security.privilege.PrivilegeBitsProvider;
+import org.apache.jackrabbit.oak.spi.security.privilege.PrivilegeConstants;
 
 public class PermissionProviderImpl implements PermissionProvider, AccessControlConstants, PermissionConstants, AggregatedPermissionProvider {
 
@@ -47,24 +48,27 @@ public class PermissionProviderImpl implements PermissionProvider, AccessControl
 
     private final String workspaceName;
 
-    private final AuthorizationConfiguration acConfig;
+    private final Context ctx;
 
     private final CompiledPermissions compiledPermissions;
 
     private Root immutableRoot;
 
-    public PermissionProviderImpl(@Nonnull Root root, @Nonnull String workspaceName, @Nonnull Set<Principal> principals,
-                                  @Nonnull AuthorizationConfiguration acConfig) {
+    public PermissionProviderImpl(@Nonnull Root root, @Nonnull String workspaceName,
+                                  @Nonnull Set<Principal> principals,
+                                  @Nonnull RestrictionProvider restrictionProvider,
+                                  @Nonnull ConfigurationParameters options,
+                                  @Nonnull Context ctx) {
         this.root = root;
         this.workspaceName = workspaceName;
-        this.acConfig = acConfig;
+        this.ctx = ctx;
 
         immutableRoot = RootFactory.createReadOnlyRoot(root);
 
-        if (principals.contains(SystemPrincipal.INSTANCE) || isAdmin(principals)) {
+        if (PermissionUtil.isAdminOrSystem(principals, options)) {
             compiledPermissions = AllPermissions.getInstance();
         } else {
-            compiledPermissions = CompiledPermissionImpl.create(immutableRoot, workspaceName, principals, acConfig);
+            compiledPermissions = CompiledPermissionImpl.create(immutableRoot, workspaceName, principals, restrictionProvider, options, ctx);
         }
     }
 
@@ -105,57 +109,39 @@ public class PermissionProviderImpl implements PermissionProvider, AccessControl
     @Override
     public boolean isGranted(@Nonnull String oakPath, @Nonnull String jcrActions) {
         TreeLocation location = TreeLocation.create(immutableRoot, oakPath);
-        boolean isAcContent = acConfig.getContext().definesLocation(location);
+        boolean isAcContent = ctx.definesLocation(location);
         long permissions = Permissions.getPermissions(jcrActions, location, isAcContent);
 
-        boolean isGranted = false;
-        PropertyState property = location.getProperty();
-        Tree tree = (property == null) ? location.getTree() : location.getParent().getTree();
-        if (tree != null) {
-            isGranted = isGranted(tree, property, permissions);
-        } else if (!isVersionStorePath(oakPath)) {
-            isGranted = compiledPermissions.isGranted(oakPath, permissions);
-        }
-        return isGranted;
+        return isGranted(location, oakPath, permissions);
     }
 
     //---------------------------------------< AggregatedPermissionProvider >---
     @Override
-    public boolean handles(@Nonnull String path, @Nonnull String jcrAction) {
-        return true;
+    public PrivilegeBits supportedPrivileges(@Nullable Tree tree, @Nullable PrivilegeBits privilegeBits) {
+        return (privilegeBits != null) ? privilegeBits : new PrivilegeBitsProvider(immutableRoot).getBits(PrivilegeConstants.JCR_ALL);
     }
 
     @Override
-    public boolean handles(@Nonnull Tree tree, @Nonnull PrivilegeBits privilegeBits) {
-        return true;
+    public long supportedPermissions(@Nullable Tree tree, @Nullable PropertyState property, long permissions) {
+        return permissions;
     }
 
     @Override
-    public boolean handles(@Nonnull Tree tree, long permission) {
-        return true;
+    public long supportedPermissions(@Nonnull TreeLocation location, long permissions) {
+        return permissions;
     }
 
     @Override
-    public boolean handles(@Nonnull TreePermission treePermission, long permission) {
-        return true;
+    public long supportedPermissions(@Nonnull TreePermission treePermission, long permissions) {
+        return permissions;
     }
 
     @Override
-    public boolean handlesRepositoryPermissions() {
-        return true;
+    public boolean isGranted(@Nonnull TreeLocation location, long permissions) {
+        return isGranted(location, location.getPath(), permissions);
     }
 
     //--------------------------------------------------------------------------
-
-    private boolean isAdmin(Set<Principal> principals) {
-        Set<String> adminNames = acConfig.getParameters().getConfigValue(PARAM_ADMINISTRATIVE_PRINCIPALS, Collections.EMPTY_SET);
-        for (Principal principal : principals) {
-            if (principal instanceof AdminPrincipal || adminNames.contains(principal.getName())) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     private static boolean isVersionStorePath(@Nonnull String oakPath) {
         if (oakPath.indexOf(JcrConstants.JCR_SYSTEM) == 1) {
@@ -166,5 +152,17 @@ public class PermissionProviderImpl implements PermissionProvider, AccessControl
             }
         }
         return false;
+    }
+
+    private boolean isGranted(@Nonnull TreeLocation location, @Nonnull String oakPath, long permissions) {
+        boolean isGranted = false;
+        PropertyState property = location.getProperty();
+        Tree tree = (property == null) ? location.getTree() : location.getParent().getTree();
+        if (tree != null) {
+            isGranted = isGranted(tree, property, permissions);
+        } else if (!isVersionStorePath(location.getPath())) {
+            isGranted = compiledPermissions.isGranted(oakPath, permissions);
+        }
+        return isGranted;
     }
 }

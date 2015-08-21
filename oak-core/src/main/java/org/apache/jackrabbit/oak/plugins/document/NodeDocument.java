@@ -706,6 +706,11 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
             newestRev = it.next();
         } else {
             // check full history (only needed in rare cases)
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("getNewestRevision() with changeRev {} on {}, " +
+                                "_revisions {}, _commitRoot {}",
+                        changeRev, getId(), getLocalRevisions(), getLocalCommitRoot());
+            }
             it = filter(Iterables.mergeSorted(
                     ImmutableList.of(getValueMap(REVISIONS).keySet(), getValueMap(COMMIT_ROOT).keySet()),
                     revisions.comparator()), predicate).iterator();
@@ -1040,14 +1045,21 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
 
     /**
      * Returns update operations to split this document. The implementation may
-     * decide to not return any operations if no splitting is required.
+     * decide to not return any operations if no splitting is required. A caller
+     * must explicitly pass a head revision even though it is available through
+     * the {@link RevisionContext}. The given head revision must reflect a head
+     * state before {@code doc} was retrieved from the document store. This is
+     * important in order to maintain consistency. See OAK-3081 for details.
      *
      * @param context the revision context.
+     * @param head    the head revision before this document was retrieved from
+     *                the document store.
      * @return the split operations.
      */
     @Nonnull
-    public Iterable<UpdateOp> split(@Nonnull RevisionContext context) {
-        return SplitOperations.forDocument(this, context);
+    public Iterable<UpdateOp> split(@Nonnull RevisionContext context,
+                                    @Nonnull Revision head) {
+        return SplitOperations.forDocument(this, context, head);
     }
 
     /**
@@ -1365,10 +1377,13 @@ public final class NodeDocument extends Document implements CachedNodeDocument{
         if(deleted) {
             //DELETED_ONCE would be set upon every delete.
             //possibly we can avoid that
-            checkNotNull(op).set(DELETED_ONCE, Boolean.TRUE);
+            setDeletedOnce(op);
         }
-        checkNotNull(op).setMapEntry(DELETED, checkNotNull(revision),
-                String.valueOf(deleted));
+        checkNotNull(op).setMapEntry(DELETED, checkNotNull(revision), String.valueOf(deleted));
+    }
+
+    public static void setDeletedOnce(@Nonnull UpdateOp op) {
+        checkNotNull(op).set(DELETED_ONCE, Boolean.TRUE);
     }
 
     public static void removeDeleted(@Nonnull UpdateOp op,

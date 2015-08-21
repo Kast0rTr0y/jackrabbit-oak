@@ -54,6 +54,9 @@
     <module>oak-it</module>
     <module>oak-pojosr</module>
     <module>oak-authorization-cug</module>
+    <module>oak-remote</module>
+    <module>oak-exercise</module>
+    <module>oak-examples</module>
   </modules>
 
   <scm>

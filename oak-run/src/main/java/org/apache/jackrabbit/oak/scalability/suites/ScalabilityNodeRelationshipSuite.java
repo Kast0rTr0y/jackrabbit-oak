@@ -30,6 +30,7 @@ import javax.jcr.PropertyType;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.commons.math.stat.descriptive.SynchronizedDescriptiveStatistics;
 import org.apache.jackrabbit.api.JackrabbitSession;
 import org.apache.jackrabbit.api.security.user.Authorizable;
@@ -55,14 +56,25 @@ import com.google.common.collect.Maps;
  * The suite test will incrementally increase the load and execute searches.
  * Each test run thus adds nodes and executes different benchmarks. This way we measure time
  * taken for benchmark execution.
- * 
- * {# NODE_LEVELS} is a comma separated string property and governs the number of number of
- * different node relationships in the following order.
  *
- * <li>Users</li>
- * <li>Groups</li>
- * <li>User Relationships</li>
- * <li>Activities</li>
+ * <p>
+ * The following system JVM properties can be defined to configure the suite.
+ * <ul>
+ * <li>
+ *     <code>nodeLevels</code> - Comma separated string property that governs the number of number of
+ *     different node relationships in the following order:
+ *      <ul>
+ *          <li>Users</li>
+ *          <li>Groups</li>
+ *          <li>User Relationships</li>
+ *          <li>Activities</li>
+ *      </ul>
+ *
+ *     Defaults to 10,5,2,1.
+ * </li>
+ * </ul>
+ * </p>
+ *
  */
 public class ScalabilityNodeRelationshipSuite extends ScalabilityNodeSuite {
     private static final Logger LOG =
@@ -93,13 +105,20 @@ public class ScalabilityNodeRelationshipSuite extends ScalabilityNodeSuite {
     protected static final List<String> NODE_LEVELS = Splitter.on(",").trimResults()
         .omitEmptyStrings().splitToList(System.getProperty("nodeLevels", "10,5,2,1"));
 
-    private static final int NUM_USERS = Integer.parseInt(NODE_LEVELS.get(0));
+    protected static final List<String> NODE_LEVELS_DEFAULT = ImmutableList.of("10","5","2","1");
 
-    private static final int NUM_GROUPS = Integer.parseInt(NODE_LEVELS.get(1));
+    private static final int NUM_USERS =
+        (NODE_LEVELS.size() >= 1 ? Integer.parseInt(NODE_LEVELS.get(0)) : Integer.parseInt(NODE_LEVELS_DEFAULT.get(0)));
 
-    private static final int NUM_RELATIONSHIPS = Integer.parseInt(NODE_LEVELS.get(2));
+    private static final int NUM_GROUPS =
+        (NODE_LEVELS.size() >= 2 ? Integer.parseInt(NODE_LEVELS.get(1)) : Integer.parseInt(NODE_LEVELS_DEFAULT.get(1)));
 
-    private static final int NUM_ACTIVITIES = Integer.parseInt(NODE_LEVELS.get(3));
+    private static final int NUM_RELATIONSHIPS =
+        (NODE_LEVELS.size() >= 3 ? Integer.parseInt(NODE_LEVELS.get(2)) : Integer.parseInt(NODE_LEVELS_DEFAULT.get(2)));
+
+    private static final int NUM_ACTIVITIES =
+        (NODE_LEVELS.size() >= 4 ? Integer.parseInt(NODE_LEVELS.get(3)) : Integer.parseInt(NODE_LEVELS_DEFAULT.get(3)));
+
 
     private static final long BUCKET_SIZE = 100;
 
@@ -266,6 +285,45 @@ public class ScalabilityNodeRelationshipSuite extends ScalabilityNodeSuite {
             writeStats);
     }
 
+    /**
+     * The users are created with the nomenclature {@code [a-z]User<INCREMENT>_<ID>}
+     *
+     * <p>
+     *
+     * Creates a node hierarchy similar to the node structure below.
+     * Here for example aUser0_1 and cUser0_5 are 2 users and aUser0_1 has a relationship structure to user cUser0_5.
+     *
+     * <pre>
+     * {@code
+     * /home
+     *  /a
+     *      /aUser0_1
+     *          /Relationships
+     *              /cUser0_5
+     *                  jcr:primaryType : <oak:Unstructured|descendantType|nt:unstructured>
+     *                  jcr:created : <DATE>
+     *                  sourceId : aUser0_1
+     *                  targetId : cUser0_5
+     *          /Activities
+     *             /2015
+     *                 /06
+     *                     /03
+     *                         /@1
+     *                             /<UUID>
+     *                                 jcr:primaryType : <oak:Unstructured|descendantType|nt:unstructured>
+     *                                 title : <sourceId targetId>
+     *                                 action : <act*>
+     *                                 sourceId : aUser0_1
+     *                                 /source
+     *                                     sourceId : aUser0_1
+     *                                 /object
+     *                                     objectId: <obj*>
+     *                                 /target
+     *                                     targetId: cUser0_5
+     * }
+     * </pre>
+     * </p>
+     */
     class ActivityWriter extends Writer {
         private int startIdx;
 

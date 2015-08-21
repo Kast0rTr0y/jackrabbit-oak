@@ -16,10 +16,18 @@
  */
 package org.apache.jackrabbit.oak.plugins.document.rdb;
 
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 import javax.annotation.Nonnull;
 
+/**
+ * Convenience methods dealing with JDBC specifics.
+ */
 public class RDBJDBCTools {
 
     protected static String jdbctype(String jdbcurl) {
@@ -44,6 +52,8 @@ public class RDBJDBCTools {
     protected static String driverForDBType(String type) {
         if ("h2".equals(type)) {
             return "org.h2.Driver";
+        } else if ("derby".equals(type)) {
+            return "org.apache.derby.jdbc.EmbeddedDriver";
         } else if ("postgresql".equals(type)) {
             return "org.postgresql.Driver";
         } else if ("db2".equals(type)) {
@@ -83,5 +93,79 @@ public class RDBJDBCTools {
             p += "_";
         }
         return p + b;
+    }
+
+    /**
+     * Return string representation of transaction isolation level.
+     */
+    protected static @Nonnull String isolationLevelToString(int isolationLevel) {
+        String name;
+        switch (isolationLevel) {
+            case Connection.TRANSACTION_NONE:
+                name = "TRANSACTION_NONE";
+                break;
+            case Connection.TRANSACTION_READ_COMMITTED:
+                name = "TRANSACTION_READ_COMMITTED";
+                break;
+            case Connection.TRANSACTION_READ_UNCOMMITTED:
+                name = "TRANSACTION_READ_UNCOMMITTED";
+                break;
+            case Connection.TRANSACTION_REPEATABLE_READ:
+                name = "TRANSACTION_REPEATABLE_READ";
+                break;
+            case Connection.TRANSACTION_SERIALIZABLE:
+                name = "TRANSACTION_SERIALIZABLE";
+                break;
+            default:
+                name = "unknown";
+                break;
+        }
+        return String.format("%s (%d)", name, isolationLevel);
+    }
+
+    /**
+     * Return a string containing additional messages from chained exceptions.
+     */
+    protected static @Nonnull String getAdditionalMessages(SQLException ex) {
+        List<String> messages = new ArrayList<String>();
+        String message = ex.getMessage();
+        SQLException next = ex.getNextException();
+        while (next != null) {
+            String m = next.getMessage();
+            if (!message.equals(m)) {
+                messages.add(m);
+            }
+            next = next.getNextException();
+        }
+
+        return messages.isEmpty() ? "" : messages.toString();
+    }
+
+    /**
+     * Check whether the exception matches one of the given states.
+     */
+    protected static boolean matchesSQLState(SQLException ex, String... statePrefix) {
+        String state = ex.getSQLState();
+        if (state != null) {
+            for (String sp : statePrefix) {
+                if (state.startsWith(sp))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Generate version diagnostics.
+     */
+    protected static String versionCheck(DatabaseMetaData md, int xmaj, int xmin, String description) throws SQLException {
+        int maj = md.getDatabaseMajorVersion();
+        int min = md.getDatabaseMinorVersion();
+        if (maj < xmaj || (maj == xmaj && min < xmin)) {
+            return "Unsupported " + description + " version: " + maj + "." + min + ", expected at least " + xmaj + "." + xmin;
+        }
+        else {
+            return "";
+        }
     }
 }
